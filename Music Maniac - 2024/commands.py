@@ -2,6 +2,7 @@ import discord  # Discord API wrapper for building bots
 import logging  # Library for logging events for debugging
 import asyncio  # Asynchronous I/O to handle asynchronous operations
 import yt_dlp  # YouTube downloading library supporting various sites
+import random  
 
 # Global dictionaries to manage voice clients and song queues for each Discord server (guild)
 voice_clients = {}
@@ -30,21 +31,22 @@ def setup_commands(client):
             return
 
         try:
-            urls = await extract_song_data(link)
-            if not urls:
+            songs = await extract_song_data(link)
+            if not songs:
                 await ctx.send("Failed to extract URL for the video.")
                 return
 
-            for url in urls:
+            for song_info in songs:
                 if voice_client.is_playing() or voice_client.is_paused():
-                    queues.setdefault(ctx.guild.id, []).append(url)
-                    await ctx.send(f"Added to queue")
+                    queues.setdefault(ctx.guild.id, []).append(song_info)
+                    await ctx.send(f"Added to queue: {song_info['title']}")
                 else:
-                    await play_song(ctx, voice_client, {'url': url, 'title': "Video title"})
-                    history.setdefault(ctx.guild.id, []).append(url)  # Add song to history when it starts playing
+                    await play_song(ctx, voice_client, song_info)
+                    history.setdefault(ctx.guild.id, []).append(song_info)
         except Exception as e:
             logging.error(f"Exception in play command: {e}")
             await ctx.send("Error in processing your request. Please try again.")
+
 
     @client.command(name="previous")
     async def previous(ctx):
@@ -68,15 +70,22 @@ def setup_commands(client):
     async def extract_song_data(link):
         try:
             data = await asyncio.get_event_loop().run_in_executor(None, lambda: ytdl.extract_info(link, download=False))
-            return [entry['url'] for entry in data['entries'] if 'url' in entry] if 'entries' in data else [data['url']]
+            if 'entries' in data:
+                # Extracting info from each entry in a playlist
+                return [{'url': entry['url'], 'title': entry.get('title', 'No title available')} for entry in data['entries'] if 'url' in entry]
+            else:
+                # Handling single video
+                return [{'url': data['url'], 'title': data.get('title', 'No title available')}]
         except Exception as e:
             logging.error(f"Failed to extract data: {e}")
             return []
+
 
     async def play_song(ctx, voice_client, song_data):
         try:
             player = discord.FFmpegOpusAudio(song_data['url'], **ffmpeg_options)
             voice_client.play(player, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(ctx), client.loop))
+            print(song_data)
             logging.info(f"Playback started for: {song_data['title']}")
             await ctx.send(f"Playing: {song_data['title']}")
         except Exception as e:
@@ -213,3 +222,39 @@ def setup_commands(client):
             await ctx.send("Video download completed.")
         else:
             await ctx.send("Invalid video URL provided.")
+    @client.command(name="shuffle")
+    async def shuffle(ctx):
+        guild_id = ctx.guild.id
+        if guild_id in queues and queues[guild_id]:
+            random.shuffle(queues[guild_id])
+            await ctx.send("Queue shuffled!")
+            logging.info(f"Queue shuffled for guild {guild_id}.")
+        else:
+            await ctx.send("No queue to shuffle.")
+            logging.info(f"No queue found to shuffle for guild {guild_id}.")
+            
+    @client.command(name="list-queue")
+    async def list_queue(ctx):
+        guild_id = ctx.guild.id
+        if guild_id in queues and queues[guild_id]:
+            # Building the queue message
+            messages = []
+            current_message = "Current queue:\n"
+            for index, song in enumerate(queues[guild_id], 1):
+                entry = f"{index}. {song['title']}\n"  # Only display the song title
+                # Check if adding the next entry will exceed the Discord message length limit of 2000 characters
+                if len(current_message) + len(entry) > 2000:
+                    messages.append(current_message)
+                    current_message = entry  # Start a new message
+                else:
+                    current_message += entry
+
+            messages.append(current_message)  # Add the last message segment
+
+            for message in messages:
+                await ctx.send(message)  # Send each part of the message
+                logging.info(f"Displayed part of the queue for guild {guild_id}.")
+        else:
+            await ctx.send("The queue is currently empty.")
+            logging.info(f"No queue to display for guild {guild_id}.")
+
