@@ -2,7 +2,9 @@ import discord  # Discord API wrapper for building bots
 import logging  # Library for logging events for debugging
 import asyncio  # Asynchronous I/O to handle asynchronous operations
 import yt_dlp  # YouTube downloading library supporting various sites
-import random  
+import random
+import os
+import threading
 
 # Global dictionaries to manage voice clients and song queues for each Discord server (guild)
 voice_clients = {}
@@ -10,14 +12,27 @@ queues = {}
 history = {}  # Dictionary to keep track of played songs
 
 # Configuration for downloading from YouTube, focusing on fetching the best audio quality available
-yt_dl_options = {"format": "bestaudio/best"}
+yt_dl_options = {"format": "bestaudio/best", 'noplaylist': False}
 ytdl = yt_dlp.YoutubeDL(yt_dl_options)
 
 # Configuration for FFmpeg
 ffmpeg_options = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn -filter:a "volume=0.50"'
+    'options': '-vn -filter:a "volume=0.75"'
 }
+
+def extract_songs(link, queue, fetch_first_only=False):
+    options = yt_dl_options.copy()
+    if fetch_first_only:
+        options['playlistend'] = 1  # Fetch only the first item for immediate playback
+
+    ytdl = yt_dlp.YoutubeDL(options)
+    data = ytdl.extract_info(link, download=False)
+    if 'entries' in data:
+        for entry in data['entries']:
+            queue.put({'url': entry['url'], 'title': entry.get('title', 'No title available')})
+    else:
+        queue.put({'url': data['url'], 'title': data.get('title', 'No title available')})
 
 def setup_commands(client):
     @client.command(name="play")
@@ -28,26 +43,36 @@ def setup_commands(client):
 
         voice_client = voice_clients.get(ctx.guild.id) or await connect_voice_client(ctx)
         if not voice_client:
+            logging.info("Voice client not available.")
             return
 
-        try:
-            songs = await extract_song_data(link)
-            if not songs:
-                await ctx.send("Failed to extract URL for the video.")
-                return
+        logging.info(f"Starting to handle playback for link: {link}")
+        client.loop.create_task(handle_playback(ctx, voice_client, link))
+    
+    async def handle_playback(ctx, voice_client, link):
+        from queue import Queue
+        song_queue = Queue()
+        
+        # Start a separate thread to fetch only the first song quickly
+        threading.Thread(target=extract_songs, args=(link, song_queue, True)).start()
 
-            for song_info in songs:
-                if voice_client.is_playing() or voice_client.is_paused():
-                    queues.setdefault(ctx.guild.id, []).append(song_info)
-                    await ctx.send(f"Added to queue: {song_info['title']}")
-                else:
-                    await play_song(ctx, voice_client, song_info)
-                    history.setdefault(ctx.guild.id, []).append(song_info)
-        except Exception as e:
-            logging.error(f"Exception in play command: {e}")
-            await ctx.send("Error in processing your request. Please try again.")
+        # Wait for the first song and play it
+        while song_queue.empty():
+            await asyncio.sleep(0.1)  # Non-blocking sleep
+        first_song = song_queue.get()
+        await play_song(ctx, voice_client, first_song)
 
+        # Continue fetching the rest in the background
+        threading.Thread(target=extract_songs, args=(link, song_queue)).start()
 
+        # Handle the rest of the songs as they are extracted
+        while True:
+            while not song_queue.empty():
+                song = song_queue.get()
+                queues.setdefault(ctx.guild.id, []).append(song)
+                await ctx.send(f"Added to queue: {song['title']}")
+            await asyncio.sleep(1)
+        
     @client.command(name="previous")
     async def previous(ctx):
         if ctx.guild.id in history and history[ctx.guild.id]:
@@ -68,43 +93,55 @@ def setup_commands(client):
             return None
 
     async def extract_song_data(link):
-        try:
-            data = await asyncio.get_event_loop().run_in_executor(None, lambda: ytdl.extract_info(link, download=False))
-            if 'entries' in data:
-                # Extracting info from each entry in a playlist
-                return [{'url': entry['url'], 'title': entry.get('title', 'No title available')} for entry in data['entries'] if 'url' in entry]
-            else:
-                # Handling single video
-                return [{'url': data['url'], 'title': data.get('title', 'No title available')}]
-        except Exception as e:
-            logging.error(f"Failed to extract data: {e}")
-            return []
+        logging.info(f"Starting extraction for link: {link}")
+        data = await asyncio.get_event_loop().run_in_executor(None, lambda: ytdl.extract_info(link, download=False))
+        if 'entries' in data:
+            for entry in data['entries']:
+                if 'url' in entry:
+                    song_data = {'url': entry['url'], 'title': entry.get('title', 'No title available')}
+                    logging.info(f"Yielding song data: {entry.get('title', 'No title available')}")
+                    yield song_data
+        else:
+            if 'url' in data:
+                song_data = {'url': data['url'], 'title': data.get('title', 'No title available')}
+                logging.info(f"Yielding single video data: {data.get('title', 'No title available')}")
+                yield song_data
 
 
     async def play_song(ctx, voice_client, song_data):
         try:
             player = discord.FFmpegOpusAudio(song_data['url'], **ffmpeg_options)
             voice_client.play(player, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(ctx), client.loop))
-            print(song_data)
-            logging.info(f"Playback started for: {song_data['title']}")
+            logging.info(f"Started playing: {song_data['title']}")
             await ctx.send(f"Playing: {song_data['title']}")
         except Exception as e:
             logging.error(f"Error during playback: {e}")
             await ctx.send("Error during playback.")
 
     async def play_next(ctx):
-        if queues.get(ctx.guild.id):
+        if queues[ctx.guild.id]:
             next_song = queues[ctx.guild.id].pop(0)
-            history.setdefault(ctx.guild.id, []).append(next_song)  # Add song to history when it starts playing
-            await play(ctx, next_song)
+            history.setdefault(ctx.guild.id, []).append(next_song)
+            await play_song(ctx, voice_clients[ctx.guild.id], next_song)
         else:
             await disconnect_voice_client(ctx)
+
+    async def connect_voice_client(ctx):
+        try:
+            voice_client = await ctx.author.voice.channel.connect()
+            voice_clients[ctx.guild.id] = voice_client
+            return voice_client
+        except Exception as e:
+            logging.error(f"Failed to connect to voice channel: {e}")
+            await ctx.send("Failed to connect to voice channel.")
+            return None
 
     async def disconnect_voice_client(ctx):
         if ctx.guild.id in voice_clients:
             await voice_clients[ctx.guild.id].disconnect()
             del voice_clients[ctx.guild.id]
             logging.info(f"Disconnected from voice channel in guild {ctx.guild.id}.")
+
     @client.command(name="clear_queue")
     async def clear_queue(ctx):
         if ctx.guild.id in queues:
@@ -257,4 +294,3 @@ def setup_commands(client):
         else:
             await ctx.send("The queue is currently empty.")
             logging.info(f"No queue to display for guild {guild_id}.")
-
