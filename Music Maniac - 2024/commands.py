@@ -5,11 +5,16 @@ import yt_dlp  # YouTube downloading library supporting various sites
 import random
 import os
 import threading
+import json
 
 # Global dictionaries to manage voice clients and song queues for each Discord server (guild)
 voice_clients = {}
-queues = {}
-history = {}  # Dictionary to keep track of played songs
+# queues = {}
+# history = {}  # Dictionary to keep track of played songs
+
+QUEUE_FILE_PATH = 'C:\\Users\\Travis\\Documents\\Python\\YT-Discord-Bot\\Music Maniac - 2024\\yt-bot-queue.json'
+HISTORY_FILE_PATH = 'C:\\Users\\Travis\\Documents\\Python\\YT-Discord-Bot\\Music Maniac - 2024\\yt-bot-queue.json'
+
 
 # Configuration for downloading from YouTube, focusing on fetching the best audio quality available
 yt_dl_options = {"format": "bestaudio/best", 'noplaylist': False}
@@ -21,36 +26,86 @@ ffmpeg_options = {
     'options': '-vn -filter:a "volume=0.75"'
 }
 
-def extract_songs(link, queue, fetch_first_only=False):
-    """Extracts songs from a given link and adds them to the provided queue. Can fetch only the first song for immediate playback."""
+def load_data_from_json(file_path):
+    try:
+        with open(file_path, 'r') as file:
+            data = file.read()
+            if data:  # Ensure the file is not empty
+                return json.loads(data)
+            else:
+                return {}  # Return an empty dictionary if the file is empty
+    except FileNotFoundError:
+        return {}  # Return an empty dictionary if the file does not exist
+    except json.JSONDecodeError:
+        logging.error(f"JSON decode error in file {file_path}. Starting with an empty dictionary.")
+        return {}  # Return an empty dictionary if there is a decoding error
+
+def save_data_to_json(data, file_path):
+    try:
+        with open(file_path, 'w') as file:
+            json.dump(data, file, indent=4)
+    except IOError as e:
+        logging.error(f"Failed to write to file {file_path}: {e}")
+
+def update_queue(guild_id, song):
+    queues.setdefault(guild_id, [])
+    queues[guild_id].append(song)
+    save_data_to_json(queues, QUEUE_FILE_PATH)
+
+def update_history(guild_id, song):
+    history.setdefault(guild_id, {'songs': [], 'current_index': -1})
+    history[guild_id]['songs'].append(song)
+    history[guild_id]['current_index'] += 1
+    save_data_to_json(history, HISTORY_FILE_PATH)
+
+queues = load_data_from_json(QUEUE_FILE_PATH)
+history = load_data_from_json(HISTORY_FILE_PATH)
+
+def extract_songs(link):
+    """Extracts songs from a given link and returns them as a list."""
     options = yt_dl_options.copy()
-    if fetch_first_only:
-        options['playlistend'] = 1  # Fetch only the first item for immediate playback
     ytdl = yt_dlp.YoutubeDL(options)
     data = ytdl.extract_info(link, download=False)
+    songs = []
     if 'entries' in data:
-        # If the link is a playlist, iterate through its entries
-        for entry in data['entries']:
-            queue.put({'url': entry['url'], 'title': entry.get('title', 'No title available')})
-            logging.debug(f"Song added to queue: {entry.get('title', 'No title available')}")
+        # Handle playlists
+        songs = [{'url': entry['url'], 'title': entry.get('title', 'No title available')} for entry in data['entries']]
     else:
-        # If the link is not a playlist, directly add the single video
-        queue.put({'url': data['url'], 'title': data.get('title', 'No title available')})
-        logging.debug(f"Single video added to queue: {data.get('title', 'No title available')}")
+        # Handle single video
+        songs.append({'url': data['url'], 'title': data.get('title', 'No title available')})
+    return songs
+
 
 def setup_commands(client):
     @client.command(name="play")
     async def play(ctx, link):
-        """Command to play music from a link in the user's current voice channel."""
         if not ctx.author.voice:
             await ctx.send("Please join a voice channel first.")
             return
         voice_client = voice_clients.get(ctx.guild.id) or await connect_voice_client(ctx)
         if not voice_client:
-            logging.info("Voice client not available.")
             return
-        logging.info(f"Starting to handle playback for link: {link}")
-        client.loop.create_task(handle_playback(ctx, voice_client, link))
+
+        # Extract songs from the provided link
+        songs = extract_songs(link)
+        if not songs:
+            await ctx.send("No songs found at the provided link.")
+            return
+
+        # Update the queue with new songs and save to JSON
+        guild_id = ctx.guild.id
+        queue = load_data_from_json(QUEUE_FILE_PATH).get(guild_id, [])
+        queue.extend(songs)
+        queues[guild_id] = queue
+        save_data_to_json(queues, QUEUE_FILE_PATH)
+
+        # Send messages about added songs
+        for song in songs:
+            await ctx.send(f"Added to queue: {song['title']}")
+
+        # Optionally start playback if nothing is currently playing
+        if not voice_client.is_playing():
+            await play_next(ctx)
     
     async def handle_playback(ctx, voice_client, link):
         """Manages the playback of songs from a link, starting with the first song and then loading the rest."""
@@ -68,14 +123,18 @@ def setup_commands(client):
                 queues.setdefault(ctx.guild.id, []).append(song)
                 await ctx.send(f"Added to queue: {song['title']}")
             await asyncio.sleep(1)
-        
+
     @client.command(name="previous")
     async def previous(ctx):
         """Plays the last song from the history, if available."""
-        if ctx.guild.id in history and history[ctx.guild.id]:
-            last_song = history[ctx.guild.id].pop()  # Remove the last played song from history
-            await play(ctx, last_song)  # Play the last song
-            await ctx.send("Playing the previous song...")
+        if ctx.guild.id in history and history[ctx.guild.id]['songs']:
+            # Decrease the current index to get the previous song, ensuring not to go below zero
+            history[ctx.guild.id]['current_index'] = max(0, history[ctx.guild.id]['current_index'] - 1)
+            
+            # Fetch the song using the current index
+            last_song = history[ctx.guild.id]['songs'][history[ctx.guild.id]['current_index']]
+            await play_song(ctx, voice_clients[ctx.guild.id], last_song)
+            await ctx.send(f"Playing the previous song: {last_song['title']}")
         else:
             await ctx.send("No previous song to play.")
             logging.info("No previous song available to play.")
@@ -95,10 +154,9 @@ def setup_commands(client):
     async def play_song(ctx, voice_client, song_data):
         """Plays a song using the provided voice client."""
         try:
-            if voice_client.is_playing():
+            if voice_client.is_playing() or voice_client.is_paused():
                 voice_client.stop()
-                # Optionally wait a bit to ensure the player has stopped
-                await asyncio.sleep(1)  # Adjust the sleep time as necessary
+                await asyncio.sleep(1000)  # Wait to ensure the player has stopped
 
             player = discord.FFmpegOpusAudio(song_data['url'], **ffmpeg_options)
             voice_client.play(player, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(ctx), client.loop))
@@ -109,14 +167,18 @@ def setup_commands(client):
             await ctx.send("Error during playback. Check the logs for more details.")
 
     async def play_next(ctx):
-        """Plays the next song in the queue, if available, or disconnects if the queue is empty."""
-        if queues[ctx.guild.id]:
-            next_song = queues[ctx.guild.id].pop(0)
-            history.setdefault(ctx.guild.id, []).append(next_song)
-            await play_song(ctx, voice_clients[ctx.guild.id], next_song)
+        """Plays the next song in the queue, if available."""
+        guild_id = ctx.guild.id
+        queue = load_data_from_json(QUEUE_FILE_PATH).get(guild_id, [])
+        if queue:
+            next_song = queue.pop(0)
+            await play_song(ctx, voice_clients[guild_id], next_song)
+            # Save the updated queue
+            save_data_to_json({guild_id: queue}, QUEUE_FILE_PATH)
         else:
-            await disconnect_voice_client(ctx)
+            await ctx.send("Queue is empty.")
             logging.info("Queue empty, disconnected from voice channel.")
+            await disconnect_voice_client(ctx)
 
     async def disconnect_voice_client(ctx):
         """Disconnects the bot from the voice channel and cleans up resources."""
@@ -217,41 +279,49 @@ def setup_commands(client):
         await ctx.send("Added to queue!")
         logging.info(f"Added URL to queue for guild {ctx.guild.id}: {url}")
             
+    # @client.command(name="list-queue")
+    # async def list_queue(ctx):
+    #     """
+    #     This command lists all the songs currently queued up in the guild's queue.
+    #     It splits the message into several parts if the total length exceeds Discord's limit of 2000 characters per message.
+    #     """
+    #     guild_id = ctx.guild.id  # Get the guild ID where the command was invoked
+    #     logging.info(f"Listing queue for guild {guild_id}. Attempting to retrieve queue data.")
+
+    #     if guild_id in queues and queues[guild_id]:
+    #         # Initialize a list to store parts of the final message if needed
+    #         messages = []
+    #         current_message = "Current queue:\n"
+    #         logging.debug(f"Initialized message building for guild {guild_id}. Queue size: {len(queues[guild_id])}")
+
+    #         # Iterate through each song in the queue
+    #         for index, song in enumerate(queues[guild_id], 1):
+    #             entry = f"{index}. {song['title']}\n"  # Prepare entry string for the message
+    #             logging.debug(f"Preparing to add song to message: {song['title']}")
+
+    #             # Check if adding the next entry will exceed the Discord message length limit of 2000 characters
+    #             if len(current_message) + len(entry) > 2000:
+    #                 messages.append(current_message)  # Append the current message to the list of messages
+    #                 current_message = entry  # Start a new message with the current song entry
+    #                 logging.debug(f"Message split for guild {guild_id}. New message started due to length.")
+    #             else:
+    #                 current_message += entry  # Add the song entry to the current message
+
+    #         messages.append(current_message)  # Add the last message segment to the list
+
+    #         # Send each part of the message
+    #         for message in messages:
+    #             await ctx.send(message)  # Send each part of the message
+    #             logging.info(f"Displayed part of the queue for guild {guild_id}. Message length: {len(message)}")
+    #     else:
+    #         # Inform the user that the queue is currently empty
+    #         await ctx.send("The queue is currently empty.")
+    #         logging.info(f"No queue to display for guild {guild_id}. Queue is empty.")
     @client.command(name="list-queue")
     async def list_queue(ctx):
-        """
-        This command lists all the songs currently queued up in the guild's queue.
-        It splits the message into several parts if the total length exceeds Discord's limit of 2000 characters per message.
-        """
-        guild_id = ctx.guild.id  # Get the guild ID where the command was invoked
-        logging.info(f"Listing queue for guild {guild_id}. Attempting to retrieve queue data.")
-
-        if guild_id in queues and queues[guild_id]:
-            # Initialize a list to store parts of the final message if needed
-            messages = []
-            current_message = "Current queue:\n"
-            logging.debug(f"Initialized message building for guild {guild_id}. Queue size: {len(queues[guild_id])}")
-
-            # Iterate through each song in the queue
-            for index, song in enumerate(queues[guild_id], 1):
-                entry = f"{index}. {song['title']}\n"  # Prepare entry string for the message
-                logging.debug(f"Preparing to add song to message: {song['title']}")
-
-                # Check if adding the next entry will exceed the Discord message length limit of 2000 characters
-                if len(current_message) + len(entry) > 2000:
-                    messages.append(current_message)  # Append the current message to the list of messages
-                    current_message = entry  # Start a new message with the current song entry
-                    logging.debug(f"Message split for guild {guild_id}. New message started due to length.")
-                else:
-                    current_message += entry  # Add the song entry to the current message
-
-            messages.append(current_message)  # Add the last message segment to the list
-
-            # Send each part of the message
-            for message in messages:
-                await ctx.send(message)  # Send each part of the message
-                logging.info(f"Displayed part of the queue for guild {guild_id}. Message length: {len(message)}")
+        queue = load_data_from_json(QUEUE_FILE_PATH).get(ctx.guild.id, [])
+        if queue:
+            message = "Current queue:\n" + "\n".join(f"{idx + 1}. {song['title']}" for idx, song in enumerate(queue))
+            await ctx.send(message)
         else:
-            # Inform the user that the queue is currently empty
             await ctx.send("The queue is currently empty.")
-            logging.info(f"No queue to display for guild {guild_id}. Queue is empty.")
