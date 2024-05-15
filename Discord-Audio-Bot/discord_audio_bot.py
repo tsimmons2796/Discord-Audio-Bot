@@ -322,7 +322,6 @@ def setup_commands(bot):
             # from the `after_playing` callback, and updates the `currently_playing` correctly,
             # we just call it directly for the next in queue without popping it here.
             await play_audio(ctx, queue[0])
-            await ctx.send(f"Now playing: {queue[0].title}")
         else:
             await ctx.send("No more tracks to skip to.")
 
