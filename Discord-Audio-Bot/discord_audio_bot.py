@@ -72,9 +72,17 @@ class BotQueue:
 queue_manager = BotQueue()
 executor = ThreadPoolExecutor(max_workers=1)
 
-async def fetch_info(url, start_index=None):
-    ydl_opts = {'format': 'bestaudio/best', 'noplaylist': False, 'playlist_items': f'{start_index}-{start_index+9}', 'ignoreerrors': True}
+async def fetch_info(url, index: int = None):
+    # Configuration for extracting a specific video at a given index
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'noplaylist': False,  # Ensure the playlist is processed
+        'playlist_items': f'{index}',  # Specify the exact video by index
+        'ignoreerrors': True
+    }
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        # Use a lambda to call extract_info within an executor for async operation
         return await asyncio.get_running_loop().run_in_executor(executor, lambda: ydl.extract_info(url, download=False))
 
 async def fetch_playlist_length(url):
@@ -84,53 +92,66 @@ async def fetch_playlist_length(url):
         return len(info.get('entries', []))
 
 async def process_play_command(ctx, url):
+    # Retrieve playlist information with only the first video details first.
+    first_video_info = await fetch_info(url, index=1)
+    if not first_video_info or 'entries' not in first_video_info or not first_video_info['entries']:
+        await ctx.send("Could not retrieve the first video of the playlist.")
+        return
+
+    first_video = first_video_info['entries'][0]  # Assuming we have the video
+    if first_video:
+        first_entry = QueueEntry(
+            video_url=first_video.get('webpage_url', ''),
+            best_audio_url=next((f['url'] for f in first_video['formats'] if f.get('acodec') != 'none'), ''),
+            title=first_video.get('title', 'Unknown title'),
+            is_playlist=True,
+            playlist_index=1
+        )
+        queue_manager.add_to_queue(first_entry)
+        await play_audio(ctx, first_entry)
+    else:
+        await ctx.send("No video found at the specified index.")
+
+    # Fetch the full playlist length for further processing
     playlist_length = await fetch_playlist_length(url)
-    logging.info(f"Playlist length: {playlist_length}")
-    print(f"Playlist length: {playlist_length}")
-    
-    index = 1
-    while index <= playlist_length:
-        logging.info(f"Processing index: {index}")
-        print(f"Processing index: {index}")
-        
-        info = await fetch_info(url, start_index=index)
-        entries = info['entries'] if 'entries' in info else [info]
-        
-        if not entries:
-            logging.info("No entries retrieved.")
-            print("No entries retrieved.")
-            break
-        
-        video = entries[0]  # We'll just consider the first video from the response
-        
-        # Queue up the video with available information
-        entry = QueueEntry(video.get('webpage_url', ''), '', video.get('title', 'Unknown title'), True, index)
-        queue_manager.add_to_queue(entry)
-        await ctx.send(f'Added to queue: {entry.title}')
-        logging.info(f'Added to queue: {entry.title}')
-        print(f'Added to queue: {entry.title}')
-        
-        # Fetch additional data (such as URL) for the video
-        audio_url = next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), None)
-        if audio_url:
-            entry.best_audio_url = audio_url
-            await ctx.send(f'URL found for {entry.title}')
-            logging.info(f'URL found for {entry.title}')
-            print(f'URL found for {entry.title}')
-        else:
-            await ctx.send(f'URL not found for {entry.title}')
-            logging.info(f'URL not found for {entry.title}')
-            print(f'URL not found for {entry.title}')
-        
-        # Start playing audio immediately for the first video
-        if index == 1:
-            await play_audio(ctx, entry)
-        
-        index += 1
+    if playlist_length > 1:
+        # Process remaining videos in batches of three
+        for start_index in range(2, playlist_length + 1, 3):
+            end_index = min(start_index + 2, playlist_length)  # Ensure we do not go out of bounds
+            for index in range(start_index, end_index + 1):
+                info = await fetch_info(url, index=index)
+                if info and 'entries' in info and info['entries']:
+                    video = info['entries'][0]
+                    entry = QueueEntry(
+                        video_url=video.get('webpage_url', ''),
+                        best_audio_url=next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), ''),
+                        title=video.get('title', 'Unknown title'),
+                        is_playlist=True,
+                        playlist_index=index
+                    )
+                    queue_manager.add_to_queue(entry)
+                    logging.info(f'Queued {entry.title} at index {index}.')
+                else:
+                    logging.warning(f"No video found or failed to retrieve video at index {index}.")
+
+# async def play_audio(ctx, entry):
+#     if not ctx.voice_client.is_playing():
+#         ctx.voice_client.play(discord.FFmpegPCMAudio(entry.best_audio_url), after=lambda e: asyncio.run_coroutine_threadsafe(play_next(ctx), ctx.bot.loop))
+#         await ctx.send(f'Now playing: {entry.title}')
+#         logging.info(f'Now playing: {entry.title}')
+#         print(f'Now playing: {entry.title}')
 
 async def play_audio(ctx, entry):
+    def after_playing(error):
+        if error:
+            logging.error(f"Error playing {entry.title}: {error}")
+            asyncio.run_coroutine_threadsafe(ctx.send("Error occurred during playback."), ctx.bot.loop).result()
+        else:
+            logging.info(f"Finished playing {entry.title}.")
+            asyncio.run_coroutine_threadsafe(play_next(ctx), ctx.bot.loop).result()
+
     if not ctx.voice_client.is_playing():
-        ctx.voice_client.play(discord.FFmpegPCMAudio(entry.best_audio_url), after=lambda e: asyncio.run_coroutine_threadsafe(play_next(ctx), ctx.bot.loop))
+        ctx.voice_client.play(discord.FFmpegPCMAudio(entry.best_audio_url), after=after_playing)
         await ctx.send(f'Now playing: {entry.title}')
         logging.info(f'Now playing: {entry.title}')
         print(f'Now playing: {entry.title}')
@@ -150,12 +171,13 @@ async def play_next(ctx):
 def setup_commands(bot):
     @bot.command(name='test')
     async def test(ctx, playlist_url):
+        # Setup yt-dlp options for lazy playlist processing
         ydl_opts = {
             'quiet': True,
             'force_generic_extractor': True,
-            'playlist_items': '3',
             'extract_audio': True,
             'audio_format': 'mp3',
+            'lazy_playlist': True,  # Corresponds to the --lazy-playlist option
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
@@ -164,17 +186,52 @@ def setup_commands(bot):
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info_dict = ydl.extract_info(playlist_url, download=False)
-            print(info_dict)
+            print(f"Extracted playlist information: {info_dict}")
             if 'entries' in info_dict:
-                video_info = info_dict['entries'][2]
-                title = video_info.get('title', 'Title not available')
-                url = video_info.get('url')
-                if url:
-                    await ctx.send(f"Title: {title}\nURL: {url}")
-                else:
-                    await ctx.send("URL not available for the video at index 3.")
+                for index, video_info in enumerate(info_dict['entries']):
+                    title = video_info.get('title', 'Title not available')
+                    url = video_info.get('url', 'URL not available')
+                    await ctx.send(f"Index: {index+1}, Title: {title}, URL: {url}")
+                    print(f"Index: {index+1}, Title: {title}, URL: {url}")
+                    if index >= 2:  # Stop after processing three entries
+                        break
             else:
-                await ctx.send("Invalid playlist URL or video not found at index 3.")
+                await ctx.send("Invalid playlist URL or video not found.")
+                print("Invalid playlist URL or video not found.")
+
+    @bot.command(name='play_specific')
+    async def play_specific(ctx, url: str, index: int):
+        """
+        Plays a specific video from a YouTube playlist at the given index.
+        :param ctx: The context under which the command is being invoked.
+        :param url: The YouTube playlist URL.
+        :param index: The index of the video in the playlist to play.
+        """
+        if not ctx.voice_client:
+            if ctx.author.voice:
+                await ctx.author.voice.channel.connect()
+            else:
+                await ctx.send("You are not connected to a voice channel.")
+                return
+
+        info = await fetch_info(url, index=index)
+        if not info or 'entries' not in info or not info['entries']:
+            await ctx.send(f"Could not retrieve video at index {index}.")
+            return
+
+        video = info['entries'][0]  # Assuming we have the video
+        if video:
+            entry = QueueEntry(
+                video_url=video.get('webpage_url', ''),
+                best_audio_url=next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), ''),
+                title=video.get('title', 'Unknown title'),
+                is_playlist=True,
+                playlist_index=index
+            )
+            queue_manager.add_to_queue(entry)
+            await play_audio(ctx, entry)
+        else:
+            await ctx.send("No video found at the specified index.")
 
     @bot.command(name='play')
     async def play(ctx, url: str):
