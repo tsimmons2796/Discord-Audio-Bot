@@ -37,25 +37,33 @@ class BotQueue:
         self.currently_playing = None
         self.queues = self.load_queues()
         self.ensure_today_queue_exists()
+        self.last_played_audio = self.load_last_played_audio()  # Initialize with saved value
 
     def load_queues(self) -> Dict[str, List[QueueEntry]]:
         try:
             with open('queues.json', 'r') as file:
                 queues_data = json.load(file)
-            return {
-                date: [QueueEntry(**entry) for entry in entries]
-                for date, entries in queues_data.items()
-            }
+            return {date: [QueueEntry(**entry) for entry in entries] for date, entries in queues_data.items()}
         except (json.JSONDecodeError, FileNotFoundError) as e:
             logging.error(f"Failed to load queues: {e}")
             return {}
+
+    def load_last_played_audio(self) -> str:
+        try:
+            with open('last_played_audio.json', 'r') as file:
+                return json.load(file).get('last_played_audio')
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            logging.error(f"Failed to load last played audio: {e}")
+            return None
 
     def save_queues(self):
         try:
             with open('queues.json', 'w') as file:
                 json.dump({k: [entry.to_dict() for entry in v] for k, v in self.queues.items()}, file, indent=4)
+            with open('last_played_audio.json', 'w') as file:
+                json.dump({'last_played_audio': self.last_played_audio}, file, indent=4)
         except Exception as e:
-            logging.error(f"Failed to save queues: {e}")
+            logging.error(f"Failed to save queues or last played audio: {e}")
 
     def get_queue(self, date_str: str) -> List[QueueEntry]:
         return self.queues.get(date_str, [])
@@ -98,6 +106,9 @@ async def fetch_playlist_length(url):
 
 async def play_audio(ctx, entry):
     queue_manager.currently_playing = entry
+    queue_manager.last_played_audio = entry.title  # Update last played audio to current title
+    queue_manager.save_queues()  # Save current state
+
     def after_playing(error):
         if error:
             logging.error(f"Error playing {entry.title}: {error}")
@@ -209,6 +220,34 @@ async def handle_single_video(ctx, info):
     await play_audio(ctx, entry)
 
 def setup_commands(bot):
+    @bot.command(name='previous')
+    async def previous(ctx):
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        queue = queue_manager.get_queue(today_str)
+
+        if queue:
+            # Retrieve the last entry in the queue
+            previous_entry = queue[-1]
+
+            # Print the last entry in the queue to the console for debugging
+            print("Last entry in the queue:", previous_entry.title, previous_entry.best_audio_url)
+
+            # Stop current playback if any
+            if ctx.voice_client:
+                ctx.voice_client.stop()
+                await asyncio.sleep(1)  # Ensure the stop command has time to process fully
+
+            # Explicitly update the currently playing track before playback
+            queue_manager.currently_playing = previous_entry
+            queue_manager.save_queues()
+
+            # Play the last track
+            await play_audio(ctx, previous_entry)
+            await ctx.send(f"Now playing: {previous_entry.title}")
+        else:
+            await ctx.send("The queue is empty.")
+
+
     bot.remove_command('help')  # Disable the built-in help command
 
     @bot.command(name='help')
