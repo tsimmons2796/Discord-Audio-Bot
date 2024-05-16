@@ -245,7 +245,13 @@ def setup_commands(bot):
         entry = queue.pop(entry_index)
         queue.insert(0, entry)
         
-        # Start playing the video
+        # Check if something is currently playing and stop it if necessary
+        if ctx.voice_client:
+            if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+                ctx.voice_client.stop()
+                await asyncio.sleep(0.5)  # Wait briefly for the stop action to take effect
+
+        # Ensure the bot is connected to the voice channel
         if not ctx.voice_client:
             if ctx.author.voice:
                 await ctx.author.voice.channel.connect()
@@ -253,8 +259,11 @@ def setup_commands(bot):
                 await ctx.send("You are not connected to a voice channel.")
                 return
 
+        # Start playing the requested video
         await play_audio(ctx, entry)
         queue_manager.save_queues()
+        await ctx.send(f"Now playing: {entry.title}")
+
     @bot.command(name='remove')
     async def remove(ctx, *, title: str):
         today_str = datetime.now().strftime('%Y-%m-%d')
