@@ -10,6 +10,7 @@ from typing import List, Dict, Optional
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import youtube_dl
+import random  # Make sure to import the random module
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, filename='queue_log.log', format='%(asctime)s:%(levelname)s:%(message)s')
@@ -95,49 +96,6 @@ async def fetch_playlist_length(url):
         info = await asyncio.get_running_loop().run_in_executor(executor, lambda: ydl.extract_info(url, download=False))
         return len(info.get('entries', []))
 
-async def process_play_command(ctx, url):
-    # Retrieve playlist information with only the first video details first.
-    first_video_info = await fetch_info(url, index=1)
-    if not first_video_info or 'entries' not in first_video_info or not first_video_info['entries']:
-        await ctx.send("Could not retrieve the first video of the playlist.")
-        return
-
-    first_video = first_video_info['entries'][0]  # Assuming we have the video
-    if first_video:
-        first_entry = QueueEntry(
-            video_url=first_video.get('webpage_url', ''),
-            best_audio_url=next((f['url'] for f in first_video['formats'] if f.get('acodec') != 'none'), ''),
-            title=first_video.get('title', 'Unknown title'),
-            is_playlist=True,
-            playlist_index=1
-        )
-        queue_manager.add_to_queue(first_entry)
-        await play_audio(ctx, first_entry)
-    else:
-        await ctx.send("No video found at the specified index.")
-
-    # Fetch the full playlist length for further processing
-    playlist_length = await fetch_playlist_length(url)
-    if playlist_length > 1:
-        # Process remaining videos in batches of three
-        for start_index in range(2, playlist_length + 1, 3):
-            end_index = min(start_index + 2, playlist_length)  # Ensure we do not go out of bounds
-            for index in range(start_index, end_index + 1):
-                info = await fetch_info(url, index=index)
-                if info and 'entries' in info and info['entries']:
-                    video = info['entries'][0]
-                    entry = QueueEntry(
-                        video_url=video.get('webpage_url', ''),
-                        best_audio_url=next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), ''),
-                        title=video.get('title', 'Unknown title'),
-                        is_playlist=True,
-                        playlist_index=index
-                    )
-                    queue_manager.add_to_queue(entry)
-                    logging.info(f'Queued {entry.title} at index {index}.')
-                else:
-                    logging.warning(f"No video found or failed to retrieve video at index {index}.")
-
 async def play_audio(ctx, entry):
     queue_manager.currently_playing = entry
     def after_playing(error):
@@ -163,7 +121,174 @@ async def play_next(ctx):
         entry = queue[0]  # Get the next entry
         await play_audio(ctx, entry)
 
+async def process_play_command(ctx, url):
+    # Retrieve playlist information with only the first video details first.
+    first_video_info = await fetch_info(url, index=1)
+    if not first_video_info or 'entries' not in first_video_info or not first_video_info['entries']:
+        await ctx.send("Could not retrieve the first video of the playlist.")
+        return
+
+    first_video = first_video_info['entries'][0]  # Assuming we have the video
+    if first_video:
+        first_entry = QueueEntry(
+            video_url=first_video.get('webpage_url', ''),
+            best_audio_url=next((f['url'] for f in first_video['formats'] if f.get('acodec') != 'none'), ''),
+            title=first_video.get('title', 'Unknown title'),
+            is_playlist=True,
+            playlist_index=1
+        )
+        queue_manager.add_to_queue(first_entry)
+        await ctx.send(f"Added to queue: {first_entry.title}")
+        await play_audio(ctx, first_entry)
+    else:
+        await ctx.send("No video found at the specified index.")
+        return
+
+    # Fetch the full playlist length for further processing
+    playlist_length = await fetch_playlist_length(url)
+    if playlist_length > 1:
+        for index in range(2, playlist_length + 1):
+            info = await fetch_info(url, index=index)
+            if info and 'entries' in info and info['entries']:
+                video = info['entries'][0]
+                entry = QueueEntry(
+                    video_url=video.get('webpage_url', ''),
+                    best_audio_url=next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), ''),
+                    title=video.get('title', 'Unknown title'),
+                    is_playlist=True,
+                    playlist_index=index
+                )
+                queue_manager.add_to_queue(entry)
+                await ctx.send(f"Added to queue: {entry.title}")
+            else:
+                await ctx.send(f"Failed to retrieve video at index {index}")
+
+    # Send the current queue summary after all videos are added
+    queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
+    titles = [entry.title for entry in queue]
+    response = "Current Queue:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
+    await ctx.send(response)
+
+async def process_single_video_or_mp3(url, ctx):
+    # This function processes a single video or MP3 URL
+    if url.lower().endswith('.mp3'):
+        return QueueEntry(video_url=url, best_audio_url=url, title=url.split('/')[-1], is_playlist=False)
+    else:
+        video_info = await fetch_info(url)
+        if video_info:
+            return QueueEntry(
+                video_url=video_info.get('webpage_url', url),
+                best_audio_url=next((f['url'] for f in video_info['formats'] if f.get('acodec') != 'none'), url),
+                title=video_info.get('title', 'Unknown title'),
+                is_playlist=False
+            )
+        else:
+            await ctx.send("Error retrieving video data.")
+            return None
+async def handle_playlist(ctx, entries):
+        for index, video in enumerate(entries, start=1):
+            entry = QueueEntry(
+                video_url=video.get('webpage_url', ''),
+                best_audio_url=next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), ''),
+                title=video.get('title', 'Unknown title'),
+                is_playlist=True,
+                playlist_index=index
+            )
+            queue_manager.add_to_queue(entry)
+            if index == 1:  # Play the first video immediately
+                await play_audio(ctx, entry)
+
+async def handle_single_video(ctx, info):
+    entry = QueueEntry(
+        video_url=info.get('webpage_url', ''),
+        best_audio_url=next((f['url'] for f in info['formats'] if f.get('acodec') != 'none'), ''),
+        title=info.get('title', 'Unknown title'),
+        is_playlist=False
+    )
+    queue_manager.add_to_queue(entry)
+    await play_audio(ctx, entry)
+
 def setup_commands(bot):
+    bot.remove_command('help')  # Disable the built-in help command
+
+    @bot.command(name='help')
+    async def help_command(ctx):
+        help_text = """
+    Here are the commands you can use:
+
+    **.play [URL or attachment]** - Play audio from a YouTube URL or attached MP3 file.
+    **.play_video [title]** - Plays the video by title from the queue.
+    **.shuffle** - Randomly shuffles the queue and shows the new order.
+    **.list_queue** - Lists all entries currently in the queue.
+    **.play_queue** - Starts playing the queue from the first track.
+    **.remove [title]** - Removes a specific track by title from the queue.
+    **.skip** - Skips the current track and plays the next one in the queue.
+    **.pause** - Pauses the currently playing track.
+    **.resume** - Resumes playback if it's paused.
+    **.stop** - Stops playback and disconnects the bot from the voice channel.
+
+    Type a command to execute it. For example: `.play https://youtube.com/watch?v=example`
+    """
+        await ctx.send(help_text)
+    @bot.command(name='play_video')
+    async def play_video(ctx, *, title: str):
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        queue = queue_manager.get_queue(today_str)
+        
+        # Find the index of the entry with the specified title
+        entry_index = next((i for i, entry in enumerate(queue) if entry.title == title), None)
+        if entry_index is None:
+            await ctx.send(f"No video found with title '{title}'.")
+            return
+
+        # Move the entry to the front of the queue
+        entry = queue.pop(entry_index)
+        queue.insert(0, entry)
+        
+        # Start playing the video
+        if not ctx.voice_client:
+            if ctx.author.voice:
+                await ctx.author.voice.channel.connect()
+            else:
+                await ctx.send("You are not connected to a voice channel.")
+                return
+
+        await play_audio(ctx, entry)
+        queue_manager.save_queues()
+    @bot.command(name='remove')
+    async def remove(ctx, *, title: str):
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        queue = queue_manager.get_queue(today_str)
+        if not queue:
+            await ctx.send("The queue is currently empty.")
+            return
+        
+        # Find and remove the entry by title
+        original_length = len(queue)
+        queue = [entry for entry in queue if entry.title != title]
+        if len(queue) == original_length:
+            await ctx.send(f"No track found with title '{title}'.")
+        else:
+            queue_manager.queues[today_str] = queue  # Update the modified queue
+            queue_manager.save_queues()  # Save changes to the queues file
+            await ctx.send(f"Removed '{title}' from the queue.")
+    @bot.command(name='shuffle')
+    async def shuffle(ctx):
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        queue = queue_manager.get_queue(today_str)
+        if not queue:
+            await ctx.send("The queue is currently empty.")
+            return
+        
+        # Shuffle the queue in-place
+        random.shuffle(queue)
+        queue_manager.queues[today_str] = queue  # Update the shuffled queue
+        queue_manager.save_queues()  # Save the shuffled queue to the file
+
+        # Prepare a response message with the new order of the queue
+        titles = [entry.title for entry in queue]
+        response = "Queue after shuffle:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
+        await ctx.send(response)
     @bot.command(name='play_queue')
     async def play_queue(ctx):
         queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
@@ -197,15 +322,13 @@ def setup_commands(bot):
 
     @bot.command(name='play')
     async def play(ctx, url: str = None):
-        # Setup the voice client connection
         voice_client = discord.utils.get(ctx.bot.voice_clients, guild=ctx.guild)
-        if not voice_client and ctx.author.voice:
-            voice_client = await ctx.author.voice.channel.connect()
-        elif not ctx.author.voice:
-            await ctx.send("You are not connected to a voice channel.")
-            return
-
-        entry = None
+        if not voice_client:
+            if ctx.author.voice:
+                voice_client = await ctx.author.voice.channel.connect()
+            else:
+                await ctx.send("You are not connected to a voice channel.")
+                return
 
         # Check for attached .mp3 files in the message
         if ctx.message.attachments:
@@ -223,40 +346,42 @@ def setup_commands(bot):
                     await play_audio(ctx, entry)
                 else:
                     await ctx.send(f"'{entry.title}' added to the queue.")
+                return
             else:
                 await ctx.send("Attached file is not a supported MP3 file.")
-            return
+                return
 
         # Handle YouTube playlist or single video URLs
         if url:
-            if "list=" in url:  # URL is a playlist
+            if "list=" in url:  # It's a playlist URL
                 playlist_length = await fetch_playlist_length(url)
                 for index in range(1, playlist_length + 1):
-                    video_info = await fetch_info(url, index)
-                    if video_info and 'entries' in video_info and video_info['entries']:
-                        video = video_info['entries'][0]
-                        entry = QueueEntry(
-                            video_url=video.get('webpage_url', ''),
-                            best_audio_url=next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), ''),
-                            title=video.get('title', 'Unknown title'),
-                            is_playlist=True,
-                            playlist_index=index
-                        )
-                        queue_manager.add_to_queue(entry)
-                        if index == 1 or not voice_client.is_playing():
-                            await play_audio(ctx, entry)
+                    if not queue_manager.currently_playing and index > 1:
+                        # Wait for the previous video to start playing
+                        await asyncio.sleep(1)  # Adjust timing based on your needs
+                    video_info = await fetch_info(url, index=index)
+                    if video_info and 'entries' in video_info:
+                        video = video_info['entries'][0] if video_info['entries'] else None
+                        if video:
+                            entry = QueueEntry(
+                                video_url=video['webpage_url'],
+                                best_audio_url=next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), ''),
+                                title=video['title'],
+                                is_playlist=True,
+                                playlist_index=index
+                            )
+                            queue_manager.add_to_queue(entry)
+                            if index == 1 or not voice_client.is_playing():
+                                await play_audio(ctx, entry)
+                            else:
+                                await ctx.send(f"Added to queue: {entry.title}")
                     else:
-                        await ctx.send(f"Could not retrieve video at index {index}.")
-                        break
-            else:  # URL is a single video or direct MP3 URL
-                video_info = await fetch_info(url)
-                if video_info:
-                    entry = QueueEntry(
-                        video_url=video_info.get('webpage_url', url),
-                        best_audio_url=next((f['url'] for f in video_info['formats'] if f.get('acodec') != 'none'), url),
-                        title=video_info.get('title', url.split('/')[-1]),
-                        is_playlist=False
-                    )
+                        await ctx.send(f"Failed to retrieve video at index {index}")
+                        break  # Stop processing further if a fetch fails
+            else:
+                # Handle single video URL or direct MP3
+                entry = await process_single_video_or_mp3(url, ctx)
+                if entry:
                     queue_manager.add_to_queue(entry)
                     if not voice_client.is_playing():
                         await play_audio(ctx, entry)
@@ -265,29 +390,15 @@ def setup_commands(bot):
         else:
             await ctx.send("Please provide a valid URL or attach an MP3 file.")
 
-        
-    async def handle_playlist(ctx, entries):
-        for index, video in enumerate(entries, start=1):
-            entry = QueueEntry(
-                video_url=video.get('webpage_url', ''),
-                best_audio_url=next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), ''),
-                title=video.get('title', 'Unknown title'),
-                is_playlist=True,
-                playlist_index=index
-            )
-            queue_manager.add_to_queue(entry)
-            if index == 1:  # Play the first video immediately
-                await play_audio(ctx, entry)
-
-    async def handle_single_video(ctx, info):
-        entry = QueueEntry(
-            video_url=info.get('webpage_url', ''),
-            best_audio_url=next((f['url'] for f in info['formats'] if f.get('acodec') != 'none'), ''),
-            title=info.get('title', 'Unknown title'),
-            is_playlist=False
-        )
-        queue_manager.add_to_queue(entry)
-        await play_audio(ctx, entry)
+    @bot.command(name='list_queue')
+    async def list_queue(ctx):
+        queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
+        if not queue:
+            await ctx.send("The queue is currently empty.")
+        else:
+            titles = [entry.title for entry in queue]
+            response = "Current Queue:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
+            await ctx.send(response)
 
     @bot.command(name='play-queue')
     async def play_queue(ctx):
