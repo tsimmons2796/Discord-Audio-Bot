@@ -323,42 +323,36 @@ def setup_commands(bot):
     @bot.command(name='play')
     async def play(ctx, url: str = None):
         voice_client = discord.utils.get(ctx.bot.voice_clients, guild=ctx.guild)
-        if not voice_client:
-            if ctx.author.voice:
-                voice_client = await ctx.author.voice.channel.connect()
-            else:
-                await ctx.send("You are not connected to a voice channel.")
-                return
+        if not voice_client and ctx.author.voice:
+            voice_client = await ctx.author.voice.channel.connect()
+        elif not voice_client:
+            await ctx.send("You are not connected to a voice channel.")
+            return
 
         # Check for attached .mp3 files in the message
         if ctx.message.attachments:
-            attachment = ctx.message.attachments[0]
-            if attachment.filename.lower().endswith('.mp3'):
-                entry = QueueEntry(
-                    video_url=attachment.url,
-                    best_audio_url=attachment.url,
-                    title=attachment.filename,
-                    is_playlist=False,
-                    playlist_index=None
-                )
-                queue_manager.add_to_queue(entry)
-                if not voice_client.is_playing():
-                    await play_audio(ctx, entry)
-                else:
+            first = True
+            for attachment in ctx.message.attachments:
+                if attachment.filename.lower().endswith('.mp3'):
+                    entry = QueueEntry(
+                        video_url=attachment.url,
+                        best_audio_url=attachment.url,
+                        title=attachment.filename,
+                        is_playlist=False,
+                        playlist_index=None
+                    )
+                    queue_manager.add_to_queue(entry)
                     await ctx.send(f"'{entry.title}' added to the queue.")
-                return
-            else:
-                await ctx.send("Attached file is not a supported MP3 file.")
-                return
+                    if first or not voice_client.is_playing():
+                        await play_audio(ctx, entry)
+                        first = False
+            return
 
-        # Handle YouTube playlist or single video URLs
-        if url:
+        elif url:
+            # Handle YouTube playlist or single video URLs
             if "list=" in url:  # It's a playlist URL
                 playlist_length = await fetch_playlist_length(url)
                 for index in range(1, playlist_length + 1):
-                    if not queue_manager.currently_playing and index > 1:
-                        # Wait for the previous video to start playing
-                        await asyncio.sleep(1)  # Adjust timing based on your needs
                     video_info = await fetch_info(url, index=index)
                     if video_info and 'entries' in video_info:
                         video = video_info['entries'][0] if video_info['entries'] else None
@@ -371,10 +365,9 @@ def setup_commands(bot):
                                 playlist_index=index
                             )
                             queue_manager.add_to_queue(entry)
+                            await ctx.send(f"Added to queue: {entry.title}")
                             if index == 1 or not voice_client.is_playing():
                                 await play_audio(ctx, entry)
-                            else:
-                                await ctx.send(f"Added to queue: {entry.title}")
                     else:
                         await ctx.send(f"Failed to retrieve video at index {index}")
                         break  # Stop processing further if a fetch fails
@@ -383,10 +376,10 @@ def setup_commands(bot):
                 entry = await process_single_video_or_mp3(url, ctx)
                 if entry:
                     queue_manager.add_to_queue(entry)
+                    await ctx.send(f"'{entry.title}' added to the queue.")
                     if not voice_client.is_playing():
                         await play_audio(ctx, entry)
-                    else:
-                        await ctx.send(f"'{entry.title}' added to the queue.")
+            return
         else:
             await ctx.send("Please provide a valid URL or attach an MP3 file.")
 
