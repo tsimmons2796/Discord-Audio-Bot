@@ -36,7 +36,7 @@ class BotQueue:
         self.currently_playing = None
         self.queues = self.load_queues()
         self.ensure_today_queue_exists()
-        self.last_played_audio = self.load_last_played_audio()  # Initialize with saved value
+        self.last_played_audio = self.load_last_played_audio()
 
     def load_queues(self) -> Dict[str, List[QueueEntry]]:
         try:
@@ -102,18 +102,9 @@ async def fetch_playlist_length(url):
         info = await asyncio.get_running_loop().run_in_executor(executor, lambda: ydl.extract_info(url, download=False))
         return len(info.get('entries', []))
 
-async def play_audio(ctx, entry, is_previous_command=False):
-    if is_previous_command:
-        # Find the entry for the last played audio
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
-        entry = next((e for e in queue if e.title == queue_manager.last_played_audio), entry)
-        if not entry:
-            await ctx.send("No previously played track found.")
-            return
-
+async def play_audio(ctx, entry):
     queue_manager.currently_playing = entry
-    queue_manager.save_queues()  # Save current state
+    queue_manager.save_queues()
 
     def after_playing(error):
         if error:
@@ -121,7 +112,6 @@ async def play_audio(ctx, entry, is_previous_command=False):
             asyncio.run_coroutine_threadsafe(ctx.send("Error occurred during playback."), ctx.bot.loop).result()
         else:
             logging.info(f"Finished playing {entry.title}.")
-            # Update last played audio to the entry that just finished
             queue_manager.last_played_audio = entry.title
             queue_manager.save_queues()
             asyncio.run_coroutine_threadsafe(play_next(ctx), ctx.bot.loop).result()
@@ -133,15 +123,13 @@ async def play_audio(ctx, entry, is_previous_command=False):
 async def play_next(ctx):
     queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
     if queue and queue_manager.currently_playing:
-        # Move current track to the end only after it finishes playing or is skipped
         current_entry = queue_manager.currently_playing
         if current_entry in queue:
             queue.remove(current_entry)
             queue.append(current_entry)
             queue_manager.save_queues()
-        # Play next available entry
         if queue:
-            entry = queue[0]  # Get the next entry
+            entry = queue[0]
             await play_audio(ctx, entry)
 
 async def process_play_command(ctx, url):
@@ -235,12 +223,27 @@ async def handle_single_video(ctx, info):
 def setup_commands(bot):
     @bot.command(name='previous')
     async def previous(ctx):
+        last_played = queue_manager.last_played_audio
+        print(f'last_played_audio: {last_played.title}')
+        if not last_played:
+            await ctx.send("There was nothing played prior.")
+            return
+
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        queue = queue_manager.get_queue(today_str)
+        entry = next((e for e in queue if e.title == last_played), None)
+
+        if not entry:
+            await ctx.send("No previously played track found.")
+            return
+
+        queue.remove(entry)
+        queue.insert(1, entry)
+        queue_manager.save_queues()
         if ctx.voice_client and ctx.voice_client.is_playing():
             ctx.voice_client.stop()
-            await asyncio.sleep(0.5)  # Ensure the stop command has time to process fully
-
-        # Play the last played track
-        await play_audio(ctx, None, is_previous_command=True)
+            await asyncio.sleep(0.5)
+        # await play_audio(ctx, entry)
 
     bot.remove_command('help')  # Disable the built-in help command
 
