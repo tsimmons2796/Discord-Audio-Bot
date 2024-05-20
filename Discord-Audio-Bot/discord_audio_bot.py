@@ -38,6 +38,7 @@ class BotQueue:
         self.ensure_today_queue_exists()
         self.last_played_audio = self.load_last_played_audio()
         self.is_restarting = False  # Flag to track if restart command is triggered
+        self.hasBeenShuffled = False
 
     def load_queues(self) -> Dict[str, List[QueueEntry]]:
         try:
@@ -325,6 +326,7 @@ def setup_commands(bot):
             return
         
         random.shuffle(queue)
+        queue_manager.hasBeenShuffled = True
         queue_manager.queues[today_str] = queue
         queue_manager.save_queues()
 
@@ -448,17 +450,14 @@ def setup_commands(bot):
 
         if ctx.voice_client and ctx.voice_client.is_playing():
             current_entry = queue_manager.currently_playing
-            if current_entry:
+            if current_entry and not queue_manager.hasBeenShuffled:
                 queue.remove(current_entry)
                 queue.append(current_entry)
                 queue_manager.save_queues()
+            
+            queue_manager.hasBeenShuffled = False
             ctx.voice_client.stop()
             await asyncio.sleep(0.5)
-
-        if queue:
-            await play_audio(ctx, queue[0])
-        else:
-            await ctx.send("No more tracks to skip to.")
 
     @bot.command(name='pause')
     async def pause(ctx):
