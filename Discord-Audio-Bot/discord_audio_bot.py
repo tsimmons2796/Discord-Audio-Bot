@@ -9,7 +9,7 @@ import yt_dlp
 from typing import List, Dict, Optional
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-import random  # Make sure to import the random module
+import random
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, filename='queue_log.log', format='%(asctime)s:%(levelname)s:%(message)s')
@@ -37,6 +37,7 @@ class BotQueue:
         self.queues = self.load_queues()
         self.ensure_today_queue_exists()
         self.last_played_audio = self.load_last_played_audio()
+        self.is_restarting = False  # Flag to track if restart command is triggered
 
     def load_queues(self) -> Dict[str, List[QueueEntry]]:
         try:
@@ -88,8 +89,8 @@ executor = ThreadPoolExecutor(max_workers=1)
 async def fetch_info(url, index: int = None):
     ydl_opts = {
         'format': 'bestaudio/best',
-        'noplaylist': False if "list=" in url else True,  # Handle playlists normally only if 'list=' is in the URL
-        'playlist_items': str(index) if index is not None else None,  # Fetch specific item if index is provided
+        'noplaylist': False if "list=" in url else True,
+        'playlist_items': str(index) if index is not None else None,
         'ignoreerrors': True
     }
 
@@ -112,34 +113,37 @@ async def play_audio(ctx, entry):
             asyncio.run_coroutine_threadsafe(ctx.send("Error occurred during playback."), ctx.bot.loop).result()
         else:
             logging.info(f"Finished playing {entry.title}.")
-            queue_manager.last_played_audio = entry.title
+            if not queue_manager.is_restarting:
+                queue_manager.last_played_audio = entry.title
             queue_manager.save_queues()
             asyncio.run_coroutine_threadsafe(play_next(ctx), ctx.bot.loop).result()
 
+    audio_source = discord.FFmpegPCMAudio(entry.best_audio_url, options='-bufsize 16384k')
     if not ctx.voice_client.is_playing():
-        ctx.voice_client.play(discord.FFmpegPCMAudio(entry.best_audio_url, options='-bufsize 512k'), after=after_playing)
+        ctx.voice_client.play(audio_source, after=after_playing)
         await ctx.send(f'Now playing: {entry.title}')
 
 async def play_next(ctx):
     queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
     if queue and queue_manager.currently_playing:
         current_entry = queue_manager.currently_playing
-        if current_entry in queue:
+        if current_entry in queue and not queue_manager.is_restarting:
             queue.remove(current_entry)
             queue.append(current_entry)
             queue_manager.save_queues()
+        elif current_entry in queue and queue_manager.is_restarting:
+            queue_manager.is_restarting = False
         if queue:
             entry = queue[0]
             await play_audio(ctx, entry)
 
 async def process_play_command(ctx, url):
-    # Retrieve playlist information with only the first video details first.
     first_video_info = await fetch_info(url, index=1)
     if not first_video_info or 'entries' not in first_video_info or not first_video_info['entries']:
         await ctx.send("Could not retrieve the first video of the playlist.")
         return
 
-    first_video = first_video_info['entries'][0]  # Assuming we have the video
+    first_video = first_video_info['entries'][0]
     if first_video:
         first_entry = QueueEntry(
             video_url=first_video.get('webpage_url', ''),
@@ -155,7 +159,6 @@ async def process_play_command(ctx, url):
         await ctx.send("No video found at the specified index.")
         return
 
-    # Fetch the full playlist length for further processing
     playlist_length = await fetch_playlist_length(url)
     if (playlist_length > 1):
         for index in range(2, playlist_length + 1):
@@ -174,14 +177,12 @@ async def process_play_command(ctx, url):
             else:
                 await ctx.send(f"Failed to retrieve video at index {index}")
 
-    # Send the current queue summary after all videos are added
     queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
     titles = [entry.title for entry in queue]
     response = "Current Queue:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
     await ctx.send(response)
 
 async def process_single_video_or_mp3(url, ctx):
-    # This function processes a single video or MP3 URL
     if url.lower().endswith('.mp3'):
         return QueueEntry(video_url=url, best_audio_url=url, title=url.split('/')[-1], is_playlist=False)
     else:
@@ -207,7 +208,7 @@ async def handle_playlist(ctx, entries):
             playlist_index=index
         )
         queue_manager.add_to_queue(entry)
-        if index == 1:  # Play the first video immediately
+        if index == 1:
             await play_audio(ctx, entry)
 
 async def handle_single_video(ctx, info):
@@ -243,9 +244,8 @@ def setup_commands(bot):
         if ctx.voice_client and ctx.voice_client.is_playing():
             ctx.voice_client.stop()
             await asyncio.sleep(0.5)
-        # await play_audio(ctx, entry)
 
-    bot.remove_command('help')  # Disable the built-in help command
+    bot.remove_command('help')
 
     @bot.command(name='help')
     async def help_command(ctx):
@@ -262,7 +262,8 @@ def setup_commands(bot):
     **.pause** - Pauses the currently playing track.
     **.resume** - Resumes playback if it's paused.
     **.stop** - Stops playback and disconnects the bot from the voice channel.
-    **.previous** - WIP.
+    **.previous** - Plays the last entry that was being played.
+    **.restart** - Restarts the currently playing track from the beginning.
     
     **Always taking suggestions for the live service of Radio-Bot**
 
@@ -275,33 +276,28 @@ def setup_commands(bot):
         today_str = datetime.now().strftime('%Y-%m-%d')
         queue = queue_manager.get_queue(today_str)
         
-        # Find the index of the entry with the specified title
         entry_index = next((i for i, entry in enumerate(queue) if entry.title == title), None)
         if entry_index is None:
             await ctx.send(f"No video found with title '{title}'.")
             return
 
-        # Move the entry to the front of the queue
         entry = queue.pop(entry_index)
-        queue.insert(0, entry)
         
-        # Check if something is currently playing and stop it if necessary
+        
         if ctx.voice_client:
             if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+                queue.insert(1, entry)
                 ctx.voice_client.stop()
-                await asyncio.sleep(0.5)  # Wait briefly for the stop action to take effect
+                await asyncio.sleep(0.5)
 
-        # Ensure the bot is connected to the voice channel
         if not ctx.voice_client:
             if ctx.author.voice:
+                queue.insert(0, entry)
                 await ctx.author.voice.channel.connect()
+                await play_audio(ctx, entry)
             else:
                 await ctx.send("You are not connected to a voice channel.")
                 return
-
-        # Start playing the requested video
-        await play_audio(ctx, entry)
-        queue_manager.save_queues()
 
     @bot.command(name='remove')
     async def remove(ctx, *, title: str):
@@ -311,14 +307,13 @@ def setup_commands(bot):
             await ctx.send("The queue is currently empty.")
             return
         
-        # Find and remove the entry by title
         original_length = len(queue)
         queue = [entry for entry in queue if entry.title != title]
         if len(queue) == original_length:
             await ctx.send(f"No track found with title '{title}'.")
         else:
-            queue_manager.queues[today_str] = queue  # Update the modified queue
-            queue_manager.save_queues()  # Save changes to the queues file
+            queue_manager.queues[today_str] = queue
+            queue_manager.save_queues()
             await ctx.send(f"Removed '{title}' from the queue.")
 
     @bot.command(name='shuffle')
@@ -329,12 +324,10 @@ def setup_commands(bot):
             await ctx.send("The queue is currently empty.")
             return
         
-        # Shuffle the queue in-place
         random.shuffle(queue)
-        queue_manager.queues[today_str] = queue  # Update the shuffled queue
-        queue_manager.save_queues()  # Save the shuffled queue to the file
+        queue_manager.queues[today_str] = queue
+        queue_manager.save_queues()
 
-        # Prepare a response message with the new order of the queue
         titles = [entry.title for entry in queue]
         response = "Queue after shuffle:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
         await ctx.send(response)
@@ -356,7 +349,6 @@ def setup_commands(bot):
                     await ctx.send("You are not connected to a voice channel.")
                     return
 
-            # Start playing the requested video
             await play_audio(ctx, entry)
         else:
             await ctx.send("Queue is empty.")
@@ -370,7 +362,6 @@ def setup_commands(bot):
             await ctx.send("You are not connected to a voice channel.")
             return
 
-        # Check for attached .mp3 files in the message
         if ctx.message.attachments:
             first = True
             for attachment in ctx.message.attachments:
@@ -390,8 +381,7 @@ def setup_commands(bot):
             return
 
         elif url:
-            # Handle YouTube playlist or single video URLs
-            if "list=" in url:  # It's a playlist URL
+            if "list=" in url:
                 playlist_length = await fetch_playlist_length(url)
                 for index in range(1, playlist_length + 1):
                     video_info = await fetch_info(url, index=index)
@@ -411,9 +401,8 @@ def setup_commands(bot):
                                 await play_audio(ctx, entry)
                     else:
                         await ctx.send(f"Failed to retrieve video at index {index}")
-                        break  # Stop processing further if a fetch fails
+                        break
             else:
-                # Handle single video URL or direct MP3
                 entry = await process_single_video_or_mp3(url, ctx)
                 if entry:
                     queue_manager.add_to_queue(entry)
@@ -433,7 +422,6 @@ def setup_commands(bot):
             titles = [entry.title for entry in queue]
             response = "Current Queue:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
             
-            # Split the response into chunks of 2000 characters
             max_length = 2000
             chunks = [response[i:i+max_length] for i in range(0, len(response), max_length)]
             
@@ -458,22 +446,16 @@ def setup_commands(bot):
             await ctx.send("Queue is empty.")
             return
 
-        # Check if the bot is currently playing audio.
         if ctx.voice_client and ctx.voice_client.is_playing():
             current_entry = queue_manager.currently_playing
             if current_entry:
-                # Move the current entry to the end of the queue
                 queue.remove(current_entry)
                 queue.append(current_entry)
                 queue_manager.save_queues()
-            # Stop the currently playing audio.
             ctx.voice_client.stop()
-            await asyncio.sleep(0.5)  # Small delay to ensure the stop command is processed.
+            await asyncio.sleep(0.5)
 
-        # Proceed to play the next song in the queue.
         if queue:
-            # Since the `play_audio` function handles the logic to play the next track,
-            # call it directly with the next entry in the queue.
             await play_audio(ctx, queue[0])
         else:
             await ctx.send("No more tracks to skip to.")
@@ -502,6 +484,21 @@ def setup_commands(bot):
             await ctx.send('Playback stopped and disconnected.')
             logging.info("Playback stopped and bot disconnected.")
             print("Playback stopped and bot disconnected.")
+
+    @bot.command(name='restart')
+    async def restart(ctx):
+        if not queue_manager.currently_playing:
+            await ctx.send("No track is currently playing.")
+            return
+
+        current_entry = queue_manager.currently_playing
+        queue_manager.is_restarting = True
+
+        if ctx.voice_client:
+            ctx.voice_client.stop()
+            await asyncio.sleep(0.5)
+
+        # await play_audio(ctx, current_entry)
 
 def run_bot():
     load_dotenv()
