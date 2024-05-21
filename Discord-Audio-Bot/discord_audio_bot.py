@@ -1,28 +1,33 @@
 import json
+import uuid
 from datetime import datetime
 import logging
 import os
 import discord
 from discord.ext import commands
+from discord import app_commands
 from dotenv import load_dotenv
 import yt_dlp
-from typing import List, Dict, Optional
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import random
 import aiohttp
 import re
+from typing import List, Dict, Optional
+import typing
+from discord import Attachment
 
-# Configure logging
 logging.basicConfig(level=logging.INFO, filename='queue_log.log', format='%(asctime)s:%(levelname)s:%(message)s')
 
 class QueueEntry:
-    def __init__(self, video_url: str, best_audio_url: str, title: str, is_playlist: bool, playlist_index: Optional[int] = None):
+    def __init__(self, video_url: str, best_audio_url: str, title: str, is_playlist: bool, thumbnail: str = '', playlist_index: Optional[int] = None, duration: int = 0):
         self.video_url = video_url
         self.best_audio_url = best_audio_url
         self.title = title
         self.is_playlist = is_playlist
         self.playlist_index = playlist_index
+        self.thumbnail = thumbnail
+        self.duration = duration
 
     def to_dict(self):
         return {
@@ -30,7 +35,8 @@ class QueueEntry:
             'best_audio_url': self.best_audio_url,
             'title': self.title,
             'is_playlist': self.is_playlist,
-            'playlist_index': self.playlist_index
+            'playlist_index': self.playlist_index,
+            'thumbnail': self.thumbnail
         }
 
 class BotQueue:
@@ -39,8 +45,9 @@ class BotQueue:
         self.queues = self.load_queues()
         self.ensure_today_queue_exists()
         self.last_played_audio = self.load_last_played_audio()
-        self.is_restarting = False  # Flag to track if restart command is triggered
-        self.hasBeenShuffled = False
+        self.is_restarting = False
+        self.has_been_shuffled = False
+        self.stop_is_triggered = False
 
     def load_queues(self) -> Dict[str, List[QueueEntry]]:
         try:
@@ -51,7 +58,7 @@ class BotQueue:
             logging.error(f"Failed to load queues: {e}")
             return {}
 
-    def load_last_played_audio(self) -> str:
+    def load_last_played_audio(self) -> Optional[str]:
         try:
             with open('last_played_audio.json', 'r') as file:
                 return json.load(file).get('last_played_audio')
@@ -64,7 +71,10 @@ class BotQueue:
             with open('queues.json', 'w') as file:
                 json.dump({k: [entry.to_dict() for entry in v] for k, v in self.queues.items()}, file, indent=4)
             with open('last_played_audio.json', 'w') as file:
-                json.dump({'last_played_audio': self.last_played_audio}, file, indent=4)
+                if self.last_played_audio is None:
+                    json.dump({'last_played_audio': None}, file, indent=4)
+                else:
+                    json.dump({'last_played_audio': self.last_played_audio}, file, indent=4)
         except Exception as e:
             logging.error(f"Failed to save queues or last played audio: {e}")
 
@@ -98,7 +108,10 @@ async def fetch_info(url, index: int = None):
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        return await asyncio.get_running_loop().run_in_executor(executor, lambda: ydl.extract_info(url, download=False))
+        info = await asyncio.get_running_loop().run_in_executor(executor, lambda: ydl.extract_info(url, download=False))
+        if 'duration' not in info and 'entries' in info:
+            info['duration'] = sum(entry['duration'] for entry in info['entries'] if 'duration' in entry)
+        return info
 
 async def fetch_playlist_length(url):
     ydl_opts = {'quiet': True, 'noplaylist': False, 'extract_entries': True}
@@ -124,52 +137,76 @@ async def download_file(url: str, dest_folder: str) -> str:
                 logging.error(f"Failed to download file: {url}")
                 return None
 
-async def play_audio(ctx, entry):
+async def play_audio(interaction, entry):
     queue_manager.currently_playing = entry
     queue_manager.save_queues()
 
     logging.info(f"Starting playback for: {entry.title} (URL: {entry.best_audio_url})")
-    logging.info(f"Buffer size set to: 65536k")
 
     def after_playing(error):
+        queue_manager.stop_is_triggered = False
         if error:
             logging.error(f"Error playing {entry.title}: {error}")
-            asyncio.run_coroutine_threadsafe(ctx.send("Error occurred during playback."), ctx.bot.loop).result()
+            asyncio.run_coroutine_threadsafe(interaction.channel.send("Error occurred during playback."), interaction.client.loop).result()
         else:
             logging.info(f"Finished playing {entry.title} at {datetime.now()}")
             if not queue_manager.is_restarting:
                 queue_manager.last_played_audio = entry.title
             queue_manager.save_queues()
-            asyncio.run_coroutine_threadsafe(play_next(ctx), ctx.bot.loop).result()
+            asyncio.run_coroutine_threadsafe(play_next(interaction), interaction.client.loop).result()
 
     async def start_playback():
         try:
-            # Log the state of the voice client before starting playback
-            if ctx.voice_client is None:
+            if interaction.guild.voice_client is None:
                 logging.warning("Voice client is None. Attempting to connect.")
-            elif not ctx.voice_client.is_connected():
+            elif not interaction.guild.voice_client.is_connected():
                 logging.warning("Voice client is not connected. Attempting to reconnect.")
-            elif ctx.voice_client.is_playing():
+            elif interaction.guild.voice_client.is_playing():
                 logging.warning("Voice client is already playing.")
-            elif ctx.voice_client.is_paused():
+            elif interaction.guild.voice_client.is_paused():
                 logging.warning("Voice client is paused.")
 
-            # Determine if the audio source is a local file or a URL
             audio_source = discord.FFmpegPCMAudio(
-                entry.best_audio_url if not entry.best_audio_url.startswith('Discord-Audio-Bot\\Discord-Audio-Bot\\downloaded-mp3s') else entry.best_audio_url,
+                entry.best_audio_url,
                 options='-bufsize 65536k -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 2 -vn'
             )
-            if not ctx.voice_client.is_playing():
-                ctx.voice_client.play(audio_source, after=after_playing)
-                await ctx.send(f'Now playing: {entry.title}')
+            if not interaction.guild.voice_client.is_playing():
+                interaction.guild.voice_client.play(audio_source, after=after_playing)
+                await send_now_playing(interaction, entry)
                 logging.info(f"Playback started for {entry.title} at {datetime.now()}")
         except Exception as e:
-            logging.error(f"Exception during playback: {e}")
-            await ctx.send(f"An error occurred during playback: {e}")
+            if not queue_manager.stop_is_triggered:
+                logging.error(f"Exception during playback: {e}")
+                await interaction.channel.send(f"An error occurred during playback: {e}")
+            if queue_manager.stop_is_triggered:
+                print('do nothing')
 
     await start_playback()
 
-async def play_next(ctx):
+async def send_now_playing(interaction, entry):
+    embed = discord.Embed(title="Now Playing", description=entry.title, url=entry.video_url)
+    embed.set_thumbnail(url=entry.thumbnail)
+    embed.add_field(name="URL", value=entry.video_url, inline=False)
+
+    view = ButtonView(interaction.client)
+    message = await interaction.channel.send(embed=embed, view=view)
+    await update_progress_bar(interaction, message, entry)
+
+async def update_progress_bar(interaction, message, entry):
+    duration = entry.duration if hasattr(entry, 'duration') else 300  # default to 5 minutes if duration is not available
+    start_time = datetime.now()
+    while True:
+        elapsed = (datetime.now() - start_time).seconds
+        if elapsed >= duration:
+            break
+        progress = elapsed / duration
+        progress_bar = "[" + "=" * int(progress * 20) + " " * (20 - int(progress * 20)) + "]"
+        embed = message.embeds[0]
+        embed.set_field_at(0, name="Progress", value=progress_bar, inline=False)
+        await message.edit(embed=embed)
+        await asyncio.sleep(10)
+
+async def play_next(interaction):
     queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
     if queue and queue_manager.currently_playing:
         current_entry = queue_manager.currently_playing
@@ -181,12 +218,12 @@ async def play_next(ctx):
             queue_manager.is_restarting = False
         if queue:
             entry = queue[0]
-            await play_audio(ctx, entry)
+            await play_audio(interaction, entry)
 
-async def process_play_command(ctx, url):
+async def process_play_command(interaction, url):
     first_video_info = await fetch_info(url, index=1)
     if not first_video_info or 'entries' not in first_video_info or not first_video_info['entries']:
-        await ctx.send("Could not retrieve the first video of the playlist.")
+        await interaction.response.send_message("Could not retrieve the first video of the playlist.")
         return
 
     first_video = first_video_info['entries'][0]
@@ -196,13 +233,15 @@ async def process_play_command(ctx, url):
             best_audio_url=next((f['url'] for f in first_video['formats'] if f.get('acodec') != 'none'), ''),
             title=first_video.get('title', 'Unknown title'),
             is_playlist=True,
-            playlist_index=1
+            thumbnail=first_video.get('thumbnail', ''),
+            playlist_index=1,
+            duration=first_video.get('duration', 0)
         )
         queue_manager.add_to_queue(first_entry)
-        await ctx.send(f"Added to queue: {first_entry.title}")
-        await play_audio(ctx, first_entry)
+        await interaction.response.send_message(f"Added to queue: {first_entry.title}")
+        await play_audio(interaction, first_entry)
     else:
-        await ctx.send("No video found at the specified index.")
+        await interaction.response.send_message("No video found at the specified index.")
         return
 
     playlist_length = await fetch_playlist_length(url)
@@ -216,19 +255,23 @@ async def process_play_command(ctx, url):
                     best_audio_url=next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), ''),
                     title=video.get('title', 'Unknown title'),
                     is_playlist=True,
-                    playlist_index=index
+                    thumbnail=video.get('thumbnail', ''),
+                    playlist_index=index,
+                    duration=video.get('duration', 0)
                 )
                 queue_manager.add_to_queue(entry)
-                await ctx.send(f"Added to queue: {entry.title}")
+                await interaction.channel.send(f"Added to queue: {entry.title}")
+                await interaction.response.send_message(f"Added to queue: {entry.title}")
             else:
-                await ctx.send(f"Failed to retrieve video at index {index}")
+                await interaction.channel.send(f"Failed to retrieve video at index {index}")
+                await interaction.response.send_message(f"Failed to retrieve video at index {index}")
 
     queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
     titles = [entry.title for entry in queue]
     response = "Current Queue:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
-    await ctx.send(response)
+    await interaction.response.send_message(response)
 
-async def process_single_video_or_mp3(url, ctx):
+async def process_single_video_or_mp3(url, interaction):
     if url.lower().endswith('.mp3'):
         return QueueEntry(video_url=url, best_audio_url=url, title=url.split('/')[-1], is_playlist=False)
     else:
@@ -238,204 +281,159 @@ async def process_single_video_or_mp3(url, ctx):
                 video_url=video_info.get('webpage_url', url),
                 best_audio_url=next((f['url'] for f in video_info['formats'] if f.get('acodec') != 'none'), url),
                 title=video_info.get('title', 'Unknown title'),
-                is_playlist=False
+                is_playlist=False,
+                thumbnail=video_info.get('thumbnail', '')
             )
         else:
-            await ctx.send("Error retrieving video data.")
+            await interaction.response.send_message("Error retrieving video data.")
             return None
 
-async def handle_playlist(ctx, entries):
+async def handle_playlist(interaction, entries):
     for index, video in enumerate(entries, start=1):
         entry = QueueEntry(
             video_url=video.get('webpage_url', ''),
             best_audio_url=next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), ''),
             title=video.get('title', 'Unknown title'),
             is_playlist=True,
+            thumbnail=video.get('thumbnail', ''),
             playlist_index=index
         )
         queue_manager.add_to_queue(entry)
         if index == 1:
-            await play_audio(ctx, entry)
+            await play_audio(interaction, entry)
 
-async def handle_single_video(ctx, info):
+async def handle_single_video(interaction, info):
     entry = QueueEntry(
         video_url=info.get('webpage_url', ''),
         best_audio_url=next((f['url'] for f in info['formats'] if f.get('acodec') != 'none'), ''),
         title=info.get('title', 'Unknown title'),
-        is_playlist=False
+        is_playlist=False,
+        thumbnail=info.get('thumbnail', '')
     )
     queue_manager.add_to_queue(entry)
-    await play_audio(ctx, entry)
+    await play_audio(interaction, entry)
 
-def setup_commands(bot):
-    @bot.command(name='previous')
-    async def previous(ctx):
-        last_played = queue_manager.last_played_audio
-        print(f'last_played_audio: {last_played.title}')
-        if not last_played:
-            await ctx.send("There was nothing played prior.")
+class AudioBot(commands.Bot):
+    def __init__(self, command_prefix, intents):
+        super().__init__(command_prefix, intents=intents)
+
+    async def setup_hook(self):
+        self.add_view(ButtonView(self))
+        await self.tree.sync()
+
+    async def on_ready(self):
+        logging.info(f'{self.user} is now connected and ready.')
+        print(f'{self.user} is now connected and ready.')
+
+class ButtonView(discord.ui.View):
+    def __init__(self, bot):
+        super().__init__(timeout=None)
+        self.bot = bot
+
+        self.pause_button_id = f"pause-{uuid.uuid4()}"
+        self.resume_button_id = f"resume-{uuid.uuid4()}"
+        self.stop_button_id = f"stop-{uuid.uuid4()}"
+        self.skip_button_id = f"skip-{uuid.uuid4()}"
+        self.restart_button_id = f"restart-{uuid.uuid4()}"
+
+        self.pause_button = discord.ui.Button(label="Pause", style=discord.ButtonStyle.primary, custom_id=self.pause_button_id)
+        self.resume_button = discord.ui.Button(label="Resume", style=discord.ButtonStyle.primary, custom_id=self.resume_button_id)
+        self.stop_button = discord.ui.Button(label="Stop", style=discord.ButtonStyle.danger, custom_id=self.stop_button_id)
+        self.skip_button = discord.ui.Button(label="Skip", style=discord.ButtonStyle.secondary, custom_id=self.skip_button_id)
+        self.restart_button = discord.ui.Button(label="Restart", style=discord.ButtonStyle.secondary, custom_id=self.restart_button_id)
+
+        self.pause_button.callback = self.pause_button_callback
+        self.resume_button.callback = self.resume_button_callback
+        self.stop_button.callback = self.stop_button_callback
+        self.skip_button.callback = self.skip_button_callback
+        self.restart_button.callback = self.restart_button_callback
+
+        self.add_item(self.pause_button)
+        self.add_item(self.resume_button)
+        self.add_item(self.stop_button)
+        self.add_item(self.skip_button)
+        self.add_item(self.restart_button)
+
+    async def pause_button_callback(self, interaction: discord.Interaction):
+        if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
+            interaction.guild.voice_client.pause()
+            await interaction.response.send_message('Playback paused.', ephemeral=True)
+
+    async def resume_button_callback(self, interaction: discord.Interaction):
+        if interaction.guild.voice_client and interaction.guild.voice_client.is_paused():
+            interaction.guild.voice_client.resume()
+            await interaction.response.send_message('Playback resumed.', ephemeral=True)
+
+    async def stop_button_callback(self, interaction: discord.Interaction):
+        if interaction.guild.voice_client:
+            queue_manager.stop_is_triggered = True
+            interaction.guild.voice_client.stop()
+            await interaction.guild.voice_client.disconnect()
+            await interaction.response.send_message('Playback stopped and disconnected.', ephemeral=True)
+
+    async def skip_button_callback(self, interaction: discord.Interaction):
+        date_str = datetime.now().strftime('%Y-%m-%d')
+        queue = queue_manager.get_queue(date_str)
+        if not queue:
+            await interaction.response.send_message("Queue is empty.", ephemeral=True)
             return
 
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
-        entry = next((e for e in queue if e.title == last_played), None)
+        if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
+            current_entry = queue_manager.currently_playing
+            if current_entry and not queue_manager.has_been_shuffled:
+                queue.remove(current_entry)
+                queue.append(current_entry)
+                queue_manager.save_queues()
 
-        if not entry:
-            await ctx.send("No previously played track found.")
-            return
-
-        queue.remove(entry)
-        queue.insert(1, entry)
-        queue_manager.save_queues()
-        if ctx.voice_client and ctx.voice_client.is_playing():
-            ctx.voice_client.stop()
+            queue_manager.has_been_shuffled = False
+            interaction.guild.voice_client.stop()
             await asyncio.sleep(0.5)
+            await interaction.response.send_message("Skipped the current track.", ephemeral=True)
 
-    bot.remove_command('help')
-
-    @bot.command(name='help')
-    async def help_command(ctx):
-        help_text = """
-    Here are the commands you can use:
-
-    **.play [URL or attachment]** - Play audio from a YouTube URL or attached MP3 file.
-    **.play_video [title]** - Plays the video by title from the queue.
-    **.shuffle** - Randomly shuffles the queue and shows the new order.
-    **.list_queue** - Lists all entries currently in the queue.
-    **.play_queue** - Starts playing the queue from the first track.
-    **.remove [title]** - Removes a specific track by title from the queue.
-    **.skip** - Skips the current track and plays the next one in the queue.
-    **.pause** - Pauses the currently playing track.
-    **.resume** - Resumes playback if it's paused.
-    **.stop** - Stops playback and disconnects the bot from the voice channel.
-    **.previous** - Plays the last entry that was being played.
-    **.restart** - Restarts the currently playing track from the beginning.
-    
-    **Always taking suggestions for the live service of Radio-Bot**
-
-    Type a command to execute it. For example: `.play https://youtube.com/watch?v=example`
-    """
-        await ctx.send(help_text)
-
-    @bot.command(name='play_video')
-    async def play_video(ctx, *, title: str):
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
-        
-        entry_index = next((i for i, entry in enumerate(queue) if entry.title == title), None)
-        if entry_index is None:
-            await ctx.send(f"No video found with title '{title}'.")
+    async def restart_button_callback(self, interaction: discord.Interaction):
+        if not queue_manager.currently_playing:
+            await interaction.response.send_message("No track is currently playing.", ephemeral=True)
             return
 
-        entry = queue.pop(entry_index)
-        
-        if ctx.voice_client:
-            if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-                if 'Discord-Audio-Bot\\Discord-Audio-Bot\\downloaded-mp3s' in entry.best_audio_url:
-                    logging.info(f'Moving {entry.title} to the front of the queue.')
-                    queue.insert(0, entry)
-                    ctx.voice_client.stop()
-                else:
-                    logging.info(f'Moving {entry.title} to second in position.')
-                    queue.insert(1, entry)
-                ctx.voice_client.stop()
-                await asyncio.sleep(1)
+        current_entry = queue_manager.currently_playing
+        queue_manager.is_restarting = True
 
-        if not ctx.voice_client:
-            if ctx.author.voice:
-                queue.insert(0, entry)
-                await ctx.author.voice.channel.connect()
-                await play_audio(ctx, entry)
-            else:
-                await ctx.send("You are not connected to a voice channel.")
-                return
+        if interaction.guild.voice_client:
+            interaction.guild.voice_client.stop()
+            await asyncio.sleep(0.5)
+            await play_audio(interaction, current_entry)
 
+class MusicCommands(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
 
-    @bot.command(name='remove')
-    async def remove(ctx, *, title: str):
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
-        if not queue:
-            await ctx.send("The queue is currently empty.")
-            return
-        
-        original_length = len(queue)
-        queue = [entry for entry in queue if entry.title != title]
-        if len(queue) == original_length:
-            await ctx.send(f"No track found with title '{title}'.")
-        else:
-            queue_manager.queues[today_str] = queue
-            queue_manager.save_queues()
-            await ctx.send(f"Removed '{title}' from the queue.")
-
-    @bot.command(name='shuffle')
-    async def shuffle(ctx):
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
-        if not queue:
-            await ctx.send("The queue is currently empty.")
-            return
-        
-        random.shuffle(queue)
-        queue_manager.hasBeenShuffled = True
-        queue_manager.queues[today_str] = queue
-        queue_manager.save_queues()
-
-        titles = [entry.title for entry in queue]
-        response = "Queue after shuffle:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
-        await ctx.send(response)
-
-    @bot.command(name='play_queue')
-    async def play_queue(ctx):
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
-        if not queue:
-            await ctx.send("Queue is empty, please add some tracks first.")
-            return
-
-        entry = queue[0] if queue else None
-        if entry:
-            if not ctx.voice_client:
-                if ctx.author.voice:
-                    await ctx.author.voice.channel.connect()
-                else:
-                    await ctx.send("You are not connected to a voice channel.")
-                    return
-
-            await play_audio(ctx, entry)
-        else:
-            await ctx.send("Queue is empty.")
-
-    @bot.command(name='play')
-    async def play(ctx, url: str = None):
-        voice_client = discord.utils.get(ctx.bot.voice_clients, guild=ctx.guild)
-        if not voice_client and ctx.author.voice:
-            voice_client = await ctx.author.voice.channel.connect()
+    @app_commands.command(name='play', description='Play a URL or attached MP3 file.')
+    async def play(self, interaction: discord.Interaction, url: str = None, mp3_file: Optional[Attachment] = None):
+        voice_client = interaction.guild.voice_client
+        if not voice_client and interaction.user.voice:
+            voice_client = await interaction.user.voice.channel.connect()
         elif not voice_client:
-            await ctx.send("You are not connected to a voice channel.")
+            await interaction.response.send_message("You are not connected to a voice channel.")
             return
 
-        if ctx.message.attachments:
-            first = True
-            for attachment in ctx.message.attachments:
-                if attachment.filename.lower().endswith('.mp3'):
-                    file_path = await download_file(attachment.url, 'Discord-Audio-Bot\\Discord-Audio-Bot\\downloaded-mp3s')
-                    if file_path:
-                        entry = QueueEntry(
-                            video_url=attachment.url,
-                            best_audio_url=file_path,
-                            title=attachment.filename,
-                            is_playlist=False,
-                            playlist_index=None
-                        )
-                        queue_manager.add_to_queue(entry)
-                        await ctx.send(f"'{entry.title}' added to the queue.")
-                        if first or not voice_client.is_playing():
-                            await play_audio(ctx, entry)
-                            first = False
+        await interaction.response.defer()
+
+        if mp3_file:
+            file_path = await download_file(mp3_file.url, 'Discord-Audio-Bot\\Discord-Audio-Bot\\downloaded-mp3s')
+            if file_path:
+                entry = QueueEntry(
+                    video_url=mp3_file.url,
+                    best_audio_url=file_path,
+                    title=mp3_file.filename,
+                    is_playlist=False,
+                    playlist_index=None
+                )
+                queue_manager.add_to_queue(entry)
+                await play_audio(interaction, entry)
+            await interaction.followup.send("Added the attached MP3 to the queue.")
             return
 
-        elif url:
+        if url:
             if "list=" in url:
                 playlist_length = await fetch_playlist_length(url)
                 for index in range(1, playlist_length + 1):
@@ -451,122 +449,258 @@ def setup_commands(bot):
                                 playlist_index=index
                             )
                             queue_manager.add_to_queue(entry)
-                            await ctx.send(f"Added to queue: {entry.title}")
+                            await interaction.channel.send(f"Added to queue: {entry.title}")
                             if index == 1 or not voice_client.is_playing():
-                                await play_audio(ctx, entry)
+                                await play_audio(interaction, entry)
                     else:
-                        await ctx.send(f"Failed to retrieve video at index {index}")
+                        await interaction.followup.send(f"Failed to retrieve video at index {index}")
                         break
             else:
-                entry = await process_single_video_or_mp3(url, ctx)
+                entry = await process_single_video_or_mp3(url, interaction)
                 if entry:
                     queue_manager.add_to_queue(entry)
-                    await ctx.send(f"'{entry.title}' added to the queue.")
                     if not voice_client.is_playing():
-                        await play_audio(ctx, entry)
+                        await play_audio(interaction, entry)
+            await interaction.followup.send(f"Added '{entry.title}' to the queue.")
             return
         else:
-            await ctx.send("Please provide a valid URL or attach an MP3 file.")
+            await interaction.followup.send("Please provide a valid URL or attach an MP3 file.")
 
-    @bot.command(name='list_queue')
-    async def list_queue(ctx):
+    @app_commands.command(name='previous', description='Play the last entry that was being played.')
+    async def previous(self, interaction: discord.Interaction):
+        last_played = queue_manager.last_played_audio
+        if not last_played:
+            await interaction.response.send_message("There was nothing played prior.")
+            return
+
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        queue = queue_manager.get_queue(today_str)
+        entry = next((e for e in queue if e.title == last_played), None)
+
+        if not entry:
+            await interaction.response.send_message("No previously played track found.")
+            return
+
+        queue.remove(entry)
+        queue.insert(1, entry)
+        queue_manager.save_queues()
+        if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
+            interaction.guild.voice_client.stop()
+            await asyncio.sleep(0.5)
+
+    @app_commands.command(name='help', description='Show the help text.')
+    async def help_command(self, interaction: discord.Interaction):
+        help_text = """
+        Here are the commands you can use:
+
+        **/play [URL or attachment]** - Play audio from a YouTube URL or attached MP3 file.
+        **/play_video [title]** - Plays the video by title from the queue.
+        **/shuffle** - Randomly shuffles the queue and shows the new order.
+        **/list_queue** - Lists all entries currently in the queue.
+        **/play_queue** - Starts playing the queue from the first track.
+        **/remove [title]** - Removes a specific track by title from the queue.
+        **/skip** - Skips the current track and plays the next one in the queue.
+        **/pause** - Pauses the currently playing track.
+        **/resume** - Resumes playback if it's paused.
+        **/stop** - Stops playback and disconnects the bot from the voice channel.
+        **/previous** - Plays the last entry that was being played.
+        **/restart** - Restarts the currently playing track from the beginning.
+        
+        **Always taking suggestions for the live service of Radio-Bot**
+
+        Type a command to execute it. For example: `/play https://youtube.com/watch?v=example`
+        """
+        await interaction.response.send_message(help_text)
+
+    @app_commands.command(name='play_video', description='Play a video from the queue by title.')
+    async def play_video(self, interaction: discord.Interaction, title: str):
+        await interaction.response.defer()  # Defer the interaction response
+
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        queue = queue_manager.get_queue(today_str)
+
+        entry_index = next((i for i, entry in enumerate(queue) if entry.title == title), None)
+        if entry_index is None:
+            await interaction.followup.send(f"No video found with title '{title}'.")
+            return
+
+        entry = queue.pop(entry_index)
+
+        if interaction.guild.voice_client:
+            if interaction.guild.voice_client.is_playing() or interaction.guild.voice_client.is_paused():
+                if 'Discord-Audio-Bot\\Discord-Audio-Bot\\downloaded-mp3s' in entry.best_audio_url:
+                    logging.info(f'Moving {entry.title} to the front of the queue.')
+                    queue.insert(0, entry)
+                    interaction.guild.voice_client.stop()
+                else:
+                    logging.info(f'Moving {entry.title} to second in position.')
+                    queue.insert(1, entry)
+                interaction.guild.voice_client.stop()
+                await asyncio.sleep(1)
+
+        if not interaction.guild.voice_client:
+            if interaction.user.voice:
+                queue.insert(0, entry)
+                await interaction.user.voice.channel.connect()
+                await play_audio(interaction, entry)
+            else:
+                await interaction.followup.send("You are not connected to a voice channel.")
+                return
+
+        await interaction.followup.send(f"Playing video: {title}")
+
+    @app_commands.command(name='remove', description='Remove a track from the queue by title.')
+    async def remove(self, interaction: discord.Interaction, title: str):
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        queue = queue_manager.get_queue(today_str)
+        if not queue:
+            await interaction.response.send_message("The queue is currently empty.")
+            return
+
+        original_length = len(queue)
+        queue = [entry for entry in queue if entry.title != title]
+        if len(queue) == original_length:
+            await interaction.response.send_message(f"No track found with title '{title}'.")
+        else:
+            queue_manager.queues[today_str] = queue
+            queue_manager.save_queues()
+            await interaction.response.send_message(f"Removed '{title}' from the queue.")
+
+    @app_commands.command(name='shuffle', description='Shuffle the current queue.')
+    async def shuffle(self, interaction: discord.Interaction):
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        queue = queue_manager.get_queue(today_str)
+        if not queue:
+            await interaction.response.send_message("The queue is currently empty.")
+            return
+
+        random.shuffle(queue)
+        queue_manager.has_been_shuffled = True
+        queue_manager.queues[today_str] = queue
+        queue_manager.save_queues()
+
+        titles = [entry.title for entry in queue]
+        response = "Queue after shuffle:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
+        await interaction.response.send_message(response)
+
+    @app_commands.command(name='play_queue', description='Play the current queue.')
+    async def play_queue(self, interaction: discord.Interaction):
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        queue = queue_manager.get_queue(today_str)
+        if not queue:
+            await interaction.response.send_message("Queue is empty, please add some tracks first.")
+            return
+
+        entry = queue[0] if queue else None
+        if entry:
+            if not interaction.guild.voice_client:
+                if interaction.user.voice:
+                    await interaction.user.voice.channel.connect()
+                else:
+                    await interaction.response.send_message("You are not connected to a voice channel.")
+                    return
+
+            await play_audio(interaction, entry)
+        else:
+            await interaction.response.send_message("Queue is empty.")
+
+    @app_commands.command(name='list_queue', description='List all entries in the current queue.')
+    async def list_queue(self, interaction: discord.Interaction):
         queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
         if not queue:
-            await ctx.send("The queue is currently empty.")
+            await interaction.response.send_message("The queue is currently empty.")
         else:
             titles = [entry.title for entry in queue]
             response = "Current Queue:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
-            
+
             max_length = 2000
             chunks = [response[i:i+max_length] for i in range(0, len(response), max_length)]
-            
-            for chunk in chunks:
-                await ctx.send(chunk)
 
-    @bot.command(name='remove_queue')
-    async def remove_queue(ctx, index: int):
+            for chunk in chunks:
+                await interaction.response.send_message(chunk)
+
+    @app_commands.command(name='remove_queue', description='Remove a track from the queue by index.')
+    async def remove_queue(self, interaction: discord.Interaction, index: int):
         queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
         if 0 <= index < len(queue):
             removed_entry = queue.pop(index)
             queue_manager.save_queues()
-            await ctx.send(f"Removed '{removed_entry.title}' from the queue.")
+            await interaction.response.send_message(f"Removed '{removed_entry.title}' from the queue.")
         else:
-            await ctx.send("Invalid index. Please provide a valid index of the song to remove.")
+            await interaction.response.send_message("Invalid index. Please provide a valid index of the song to remove.")
 
-    @bot.command(name='skip')
-    async def skip(ctx):
+    @app_commands.command(name='skip', description='Skip the current track.')
+    async def skip(self, interaction: discord.Interaction):
         date_str = datetime.now().strftime('%Y-%m-%d')
         queue = queue_manager.get_queue(date_str)
         if not queue:
-            await ctx.send("Queue is empty.")
+            await interaction.response.send_message("Queue is empty.")
             return
 
-        if ctx.voice_client and ctx.voice_client.is_playing():
+        if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
             current_entry = queue_manager.currently_playing
-            if current_entry and not queue_manager.hasBeenShuffled:
+            if current_entry and not queue_manager.has_been_shuffled:
                 queue.remove(current_entry)
                 queue.append(current_entry)
                 queue_manager.save_queues()
-            
-            queue_manager.hasBeenShuffled = False
-            ctx.voice_client.stop()
+
+            queue_manager.has_been_shuffled = False
+            interaction.guild.voice_client.stop()
             await asyncio.sleep(0.5)
 
-    @bot.command(name='pause')
-    async def pause(ctx):
-        if ctx.voice_client and ctx.voice_client.is_playing():
-            ctx.voice_client.pause()
-            await ctx.send('Playback paused.')
+    @app_commands.command(name='pause', description='Pause the currently playing track.')
+    async def pause(self, interaction: discord.Interaction):
+        if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
+            interaction.guild.voice_client.pause()
+            await interaction.response.send_message('Playback paused.')
             logging.info("Playback paused.")
             print("Playback paused.")
 
-    @bot.command(name='resume')
-    async def resume(ctx):
-        if ctx.voice_client and ctx.voice_client.is_paused():
-            ctx.voice_client.resume()
-            await ctx.send('Playback resumed.')
+    @app_commands.command(name='resume', description='Resume playback if it is paused.')
+    async def resume(self, interaction: discord.Interaction):
+        if interaction.guild.voice_client and interaction.guild.voice_client.is_paused():
+            interaction.guild.voice_client.resume()
+            await interaction.response.send_message('Playback resumed.')
             logging.info("Playback resumed.")
             print("Playback resumed.")
 
-    @bot.command(name='stop')
-    async def stop(ctx):
-        if ctx.voice_client:
-            ctx.voice_client.stop()
-            await ctx.voice_client.disconnect()
-            await ctx.send('Playback stopped and disconnected.')
+    @app_commands.command(name='stop', description='Stop playback and disconnect the bot from the voice channel.')
+    async def stop(self, interaction: discord.Interaction):
+        queue_manager.stop_is_triggered = True
+        print(f'in the stop command function ------- {queue_manager.stop_is_triggered}')
+        if interaction.guild.voice_client:
+            interaction.guild.voice_client.stop()
+            await interaction.guild.voice_client.disconnect()
+            await interaction.response.send_message('Playback stopped and disconnected.')
             logging.info("Playback stopped and bot disconnected.")
             print("Playback stopped and bot disconnected.")
 
-    @bot.command(name='restart')
-    async def restart(ctx):
+    @app_commands.command(name='restart', description='Restart the currently playing track from the beginning.')
+    async def restart(self, interaction: discord.Interaction):
         if not queue_manager.currently_playing:
-            await ctx.send("No track is currently playing.")
+            await interaction.response.send_message("No track is currently playing.")
             return
 
         current_entry = queue_manager.currently_playing
         queue_manager.is_restarting = True
 
-        if ctx.voice_client:
-            ctx.voice_client.stop()
+        if interaction.guild.voice_client:
+            interaction.guild.voice_client.stop()
             await asyncio.sleep(0.5)
-
-        # await play_audio(ctx, current_entry)
+            await play_audio(interaction, current_entry)
 
 def run_bot():
     load_dotenv()
     TOKEN = os.getenv('discord_token')
     intents = discord.Intents.default()
     intents.message_content = True
-    client = commands.Bot(command_prefix=".", intents=intents)
+    client = AudioBot(command_prefix=".", intents=intents)
 
     @client.event
     async def on_ready():
-        logging.info(f'{client.user} is now connected and ready.')
-        print(f'{client.user} is now connected and ready.')
-        # Optionally, start playing the queue on bot startup:
-        # await play_queue(client)
+        await client.setup_hook()
 
-    setup_commands(client)
+    asyncio.run(client.add_cog(MusicCommands(client)))
     client.run(TOKEN)
 
 if __name__ == '__main__':
