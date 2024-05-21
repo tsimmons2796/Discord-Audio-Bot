@@ -326,42 +326,62 @@ class AudioBot(commands.Bot):
         print(f'{self.user} is now connected and ready.')
 
 class ButtonView(discord.ui.View):
-    def __init__(self, bot):
+    def __init__(self, bot, paused: bool = False):
         super().__init__(timeout=None)
         self.bot = bot
+        self.paused = paused
 
         self.pause_button_id = f"pause-{uuid.uuid4()}"
         self.resume_button_id = f"resume-{uuid.uuid4()}"
         self.stop_button_id = f"stop-{uuid.uuid4()}"
         self.skip_button_id = f"skip-{uuid.uuid4()}"
         self.restart_button_id = f"restart-{uuid.uuid4()}"
+        self.shuffle_button_id = f"shuffle-{uuid.uuid4()}"  # New Shuffle button ID
+        self.list_queue_button_id = f"list_queue-{uuid.uuid4()}"  # New List Queue button ID
 
         self.pause_button = discord.ui.Button(label="Pause", style=discord.ButtonStyle.primary, custom_id=self.pause_button_id)
         self.resume_button = discord.ui.Button(label="Resume", style=discord.ButtonStyle.primary, custom_id=self.resume_button_id)
         self.stop_button = discord.ui.Button(label="Stop", style=discord.ButtonStyle.danger, custom_id=self.stop_button_id)
         self.skip_button = discord.ui.Button(label="Skip", style=discord.ButtonStyle.secondary, custom_id=self.skip_button_id)
         self.restart_button = discord.ui.Button(label="Restart", style=discord.ButtonStyle.secondary, custom_id=self.restart_button_id)
+        self.shuffle_button = discord.ui.Button(label="Shuffle", style=discord.ButtonStyle.secondary, custom_id=self.shuffle_button_id)  # New Shuffle button
+        self.list_queue_button = discord.ui.Button(label="List Queue", style=discord.ButtonStyle.secondary, custom_id=self.list_queue_button_id)  # New List Queue button
 
         self.pause_button.callback = self.pause_button_callback
         self.resume_button.callback = self.resume_button_callback
         self.stop_button.callback = self.stop_button_callback
         self.skip_button.callback = self.skip_button_callback
         self.restart_button.callback = self.restart_button_callback
+        self.shuffle_button.callback = self.shuffle_button_callback  # Set callback for the Shuffle button
+        self.list_queue_button.callback = self.list_queue_button_callback  # Set callback for the List Queue button
 
-        self.add_item(self.pause_button)
-        self.add_item(self.resume_button)
+        self.update_buttons()
+
+    def update_buttons(self):
+        """Updates the buttons based on the state of the voice client."""
+        self.clear_items()  # Clear all buttons before updating
+
+        if self.paused:
+            self.add_item(self.resume_button)
+        else:
+            self.add_item(self.pause_button)
+
         self.add_item(self.stop_button)
         self.add_item(self.skip_button)
         self.add_item(self.restart_button)
+        self.add_item(self.shuffle_button)  # Add the Shuffle button to the view
+        self.add_item(self.list_queue_button)  # Add the List Queue button to the view
 
     async def pause_button_callback(self, interaction: discord.Interaction):
         if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
             interaction.guild.voice_client.pause()
+            await self.send_now_playing(interaction, queue_manager.currently_playing, paused=True)
             await interaction.response.send_message('Playback paused.', ephemeral=True)
 
     async def resume_button_callback(self, interaction: discord.Interaction):
         if interaction.guild.voice_client and interaction.guild.voice_client.is_paused():
             interaction.guild.voice_client.resume()
+            await self.send_now_playing(interaction, queue_manager.currently_playing, paused=False)
             await interaction.response.send_message('Playback resumed.', ephemeral=True)
 
     async def stop_button_callback(self, interaction: discord.Interaction):
@@ -402,6 +422,61 @@ class ButtonView(discord.ui.View):
             interaction.guild.voice_client.stop()
             await asyncio.sleep(0.5)
             await play_audio(interaction, current_entry)
+
+    async def shuffle_button_callback(self, interaction: discord.Interaction):
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        queue = queue_manager.get_queue(today_str)
+        if not queue:
+            await interaction.response.send_message("The queue is currently empty.")
+            return
+
+        random.shuffle(queue)
+        queue_manager.has_been_shuffled = True
+        queue_manager.queues[today_str] = queue
+        queue_manager.save_queues()
+
+        titles = [entry.title for entry in queue]
+        response = "Queue after shuffle:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
+        await interaction.response.send_message(response)
+
+    async def list_queue_button_callback(self, interaction: discord.Interaction):
+        queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
+        if not queue:
+            await interaction.response.send_message("The queue is currently empty.")
+        else:
+            titles = [entry.title for entry in queue]
+            response = "Current Queue:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
+
+            max_length = 2000
+            chunks = [response[i:i+max_length] for i in range(0, len(response), max_length)]
+
+            for chunk in chunks:
+                await interaction.response.send_message(chunk)
+            await self.send_now_playing(interaction, queue[0])
+
+    async def send_now_playing(self, interaction, entry, paused=False, stopped=False):
+        if stopped:
+            await interaction.channel.send("Playback stopped.")
+            return
+        
+        embed = discord.Embed(title="Now Playing", description=entry.title, url=entry.video_url)
+        embed.set_thumbnail(url=entry.thumbnail)
+        embed.add_field(name="URL", value=entry.video_url, inline=False)
+
+        view = ButtonView(interaction.client, paused=paused)
+        await interaction.channel.send(embed=embed, view=view)
+
+    async def send_now_playing(self, interaction, entry, paused=False, stopped=False):
+        if stopped:
+            await interaction.channel.send("Playback stopped.")
+            return
+        
+        embed = discord.Embed(title="Now Playing", description=entry.title, url=entry.video_url)
+        embed.set_thumbnail(url=entry.thumbnail)
+        embed.add_field(name="URL", value=entry.video_url, inline=False)
+
+        view = ButtonView(interaction.client, paused=paused)
+        await interaction.channel.send(embed=embed, view=view)
 
 class MusicCommands(commands.Cog):
     def __init__(self, bot):
