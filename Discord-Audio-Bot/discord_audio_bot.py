@@ -10,6 +10,8 @@ from typing import List, Dict, Optional
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import random
+import aiohttp
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, filename='queue_log.log', format='%(asctime)s:%(levelname)s:%(message)s')
@@ -104,25 +106,68 @@ async def fetch_playlist_length(url):
         info = await asyncio.get_running_loop().run_in_executor(executor, lambda: ydl.extract_info(url, download=False))
         return len(info.get('entries', []))
 
+def sanitize_filename(filename: str) -> str:
+    return re.sub(r'[^a-zA-Z0-9_\-.]', '_', filename)
+
+async def download_file(url: str, dest_folder: str) -> str:
+    os.makedirs(dest_folder, exist_ok=True)
+    filename = sanitize_filename(os.path.basename(url))
+    file_path = os.path.join(dest_folder, filename)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            if response.status == 200:
+                with open(file_path, 'wb') as f:
+                    f.write(await response.read())
+                logging.info(f"Downloaded file: {file_path}")
+                return file_path
+            else:
+                logging.error(f"Failed to download file: {url}")
+                return None
+
 async def play_audio(ctx, entry):
     queue_manager.currently_playing = entry
     queue_manager.save_queues()
+
+    logging.info(f"Starting playback for: {entry.title} (URL: {entry.best_audio_url})")
+    logging.info(f"Buffer size set to: 65536k")
 
     def after_playing(error):
         if error:
             logging.error(f"Error playing {entry.title}: {error}")
             asyncio.run_coroutine_threadsafe(ctx.send("Error occurred during playback."), ctx.bot.loop).result()
         else:
-            logging.info(f"Finished playing {entry.title}.")
+            logging.info(f"Finished playing {entry.title} at {datetime.now()}")
             if not queue_manager.is_restarting:
                 queue_manager.last_played_audio = entry.title
             queue_manager.save_queues()
             asyncio.run_coroutine_threadsafe(play_next(ctx), ctx.bot.loop).result()
 
-    audio_source = discord.FFmpegPCMAudio(entry.best_audio_url, options='-bufsize 16384k')
-    if not ctx.voice_client.is_playing():
-        ctx.voice_client.play(audio_source, after=after_playing)
-        await ctx.send(f'Now playing: {entry.title}')
+    async def start_playback():
+        try:
+            # Log the state of the voice client before starting playback
+            if ctx.voice_client is None:
+                logging.warning("Voice client is None. Attempting to connect.")
+            elif not ctx.voice_client.is_connected():
+                logging.warning("Voice client is not connected. Attempting to reconnect.")
+            elif ctx.voice_client.is_playing():
+                logging.warning("Voice client is already playing.")
+            elif ctx.voice_client.is_paused():
+                logging.warning("Voice client is paused.")
+
+            # Determine if the audio source is a local file or a URL
+            audio_source = discord.FFmpegPCMAudio(
+                entry.best_audio_url if not entry.best_audio_url.startswith('Discord-Audio-Bot\\Discord-Audio-Bot\\downloaded-mp3s') else entry.best_audio_url,
+                options='-bufsize 65536k -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 2 -vn'
+            )
+            if not ctx.voice_client.is_playing():
+                ctx.voice_client.play(audio_source, after=after_playing)
+                await ctx.send(f'Now playing: {entry.title}')
+                logging.info(f"Playback started for {entry.title} at {datetime.now()}")
+        except Exception as e:
+            logging.error(f"Exception during playback: {e}")
+            await ctx.send(f"An error occurred during playback: {e}")
+
+    await start_playback()
 
 async def play_next(ctx):
     queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
@@ -284,12 +329,17 @@ def setup_commands(bot):
 
         entry = queue.pop(entry_index)
         
-        
         if ctx.voice_client:
             if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-                queue.insert(1, entry)
+                if 'Discord-Audio-Bot\\Discord-Audio-Bot\\downloaded-mp3s' in entry.best_audio_url:
+                    logging.info(f'Moving {entry.title} to the front of the queue.')
+                    queue.insert(0, entry)
+                    ctx.voice_client.stop()
+                else:
+                    logging.info(f'Moving {entry.title} to second in position.')
+                    queue.insert(1, entry)
                 ctx.voice_client.stop()
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1)
 
         if not ctx.voice_client:
             if ctx.author.voice:
@@ -299,6 +349,7 @@ def setup_commands(bot):
             else:
                 await ctx.send("You are not connected to a voice channel.")
                 return
+
 
     @bot.command(name='remove')
     async def remove(ctx, *, title: str):
@@ -368,18 +419,20 @@ def setup_commands(bot):
             first = True
             for attachment in ctx.message.attachments:
                 if attachment.filename.lower().endswith('.mp3'):
-                    entry = QueueEntry(
-                        video_url=attachment.url,
-                        best_audio_url=attachment.url,
-                        title=attachment.filename,
-                        is_playlist=False,
-                        playlist_index=None
-                    )
-                    queue_manager.add_to_queue(entry)
-                    await ctx.send(f"'{entry.title}' added to the queue.")
-                    if first or not voice_client.is_playing():
-                        await play_audio(ctx, entry)
-                        first = False
+                    file_path = await download_file(attachment.url, 'Discord-Audio-Bot\\Discord-Audio-Bot\\downloaded-mp3s')
+                    if file_path:
+                        entry = QueueEntry(
+                            video_url=attachment.url,
+                            best_audio_url=file_path,
+                            title=attachment.filename,
+                            is_playlist=False,
+                            playlist_index=None
+                        )
+                        queue_manager.add_to_queue(entry)
+                        await ctx.send(f"'{entry.title}' added to the queue.")
+                        if first or not voice_client.is_playing():
+                            await play_audio(ctx, entry)
+                            first = False
             return
 
         elif url:
