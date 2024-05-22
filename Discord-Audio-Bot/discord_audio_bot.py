@@ -20,7 +20,7 @@ from discord import Attachment
 logging.basicConfig(level=logging.INFO, filename='queue_log.log', format='%(asctime)s:%(levelname)s:%(message)s')
 
 class QueueEntry:
-    def __init__(self, video_url: str, best_audio_url: str, title: str, is_playlist: bool, thumbnail: str = '', playlist_index: Optional[int] = None, duration: int = 0, is_favorited = False):
+    def __init__(self, video_url: str, best_audio_url: str, title: str, is_playlist: bool, thumbnail: str = '', playlist_index: Optional[int] = None, duration: int = 0):
         self.video_url = video_url
         self.best_audio_url = best_audio_url
         self.title = title
@@ -36,8 +36,7 @@ class QueueEntry:
             'title': self.title,
             'is_playlist': self.is_playlist,
             'playlist_index': self.playlist_index,
-            'thumbnail': self.thumbnail,
-            # 'is_favorited': self.is_favorited,
+            'thumbnail': self.thumbnail
         }
 
 class BotQueue:
@@ -208,25 +207,18 @@ async def update_progress_bar(interaction, message, entry):
         await asyncio.sleep(10)
 
 async def play_next(interaction):
-    date_str = datetime.now().strftime('%Y-%m-%d')
-    queue = queue_manager.get_queue(date_str)
-    
+    queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
     if queue and queue_manager.currently_playing:
         current_entry = queue_manager.currently_playing
-        if current_entry in queue:
+        if current_entry in queue and not queue_manager.is_restarting:
             queue.remove(current_entry)
+            queue.append(current_entry)
             queue_manager.save_queues()
-        else:
-            logging.warning("Current entry not found in the queue.")
-        
-    if queue:
-        next_entry = queue[0]
-        queue_manager.currently_playing = next_entry
-        queue_manager.save_queues()
-        await play_audio(interaction, next_entry)
-    else:
-        queue_manager.currently_playing = None
-        logging.info("Queue is empty. No more tracks to play.")
+        elif current_entry in queue and queue_manager.is_restarting:
+            queue_manager.is_restarting = False
+        if queue:
+            entry = queue[0]
+            await play_audio(interaction, entry)
 
 async def process_play_command(interaction, url):
     first_video_info = await fetch_info(url, index=1)
@@ -367,7 +359,7 @@ class ButtonView(discord.ui.View):
         self.shuffle_button.callback = self.shuffle_button_callback
         self.list_queue_button.callback = self.list_queue_button_callback
         self.remove_button.callback = self.remove_button_callback
-        self.previous_button.callback = self.previous_button_callback  # Set callback for the Previous button
+        self.previous_button.callback = self.previous_button_callback 
 
         self.update_buttons()
 
@@ -383,11 +375,11 @@ class ButtonView(discord.ui.View):
         self.add_item(self.stop_button)
         self.add_item(self.skip_button)
         self.add_item(self.restart_button)
-        self.add_item(self.shuffle_button)
-        self.add_item(self.list_queue_button)
+        self.add_item(self.shuffle_button)  # Add the Shuffle button to the view
+        self.add_item(self.list_queue_button)  # Add the List Queue button to the view
         self.add_item(self.remove_button)
         self.add_item(self.previous_button)
-            
+
     async def pause_button_callback(self, interaction: discord.Interaction):
         if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
             interaction.guild.voice_client.pause()
@@ -471,6 +463,7 @@ class ButtonView(discord.ui.View):
             for chunk in chunks:
                 await interaction.response.send_message(chunk)
             await self.send_now_playing(interaction, queue[0])
+
     async def remove_button_callback(self, interaction: discord.Interaction):
         if not queue_manager.currently_playing:
             await interaction.response.send_message("No track is currently playing.", ephemeral=True)
@@ -636,7 +629,6 @@ class MusicCommands(commands.Cog):
         **/list_queue** - Lists all entries currently in the queue.
         **/play_queue** - Starts playing the queue from the first track.
         **/remove_by_title [title]** - Removes a specific track by title from the queue.
-        **/remove_queue [index]** - Removes a track by its index in the queue.
         **/skip** - Skips the current track and plays the next one in the queue.
         **/pause** - Pauses the currently playing track.
         **/resume** - Resumes playback if it's paused.
@@ -669,12 +661,12 @@ class MusicCommands(commands.Cog):
                 if 'Discord-Audio-Bot\\Discord-Audio-Bot\\downloaded-mp3s' in entry.best_audio_url:
                     logging.info(f'Moving {entry.title} to the front of the queue.')
                     queue.insert(0, entry)
-                    queue_manager.save_queues()
+                    # queue_manager.save_queues()
                     interaction.guild.voice_client.stop()
                 else:
                     logging.info(f'Moving {entry.title} to second in position.')
-                    queue.insert(0, entry)
-                    queue_manager.save_queues()
+                    queue.insert(1, entry)
+                    # queue_manager.save_queues()
                 interaction.guild.voice_client.stop()
                 await asyncio.sleep(1)
 
@@ -828,19 +820,6 @@ class MusicCommands(commands.Cog):
             interaction.guild.voice_client.stop()
             await asyncio.sleep(0.5)
             await play_audio(interaction, current_entry)
-
-    # @app_commands.command(name='search', description='Search for a track and play it.')
-    # async def search(self, interaction: discord.Interaction, query: str):
-    #     search_url = f'https://www.youtube.com/results?search_query={query}'
-    #     async with aiohttp.ClientSession() as session:
-    #         async with session.get(search_url) as response:
-    #             page = await response.text()
-    #             video_ids = re.findall(r"watch\?v=(\S{11})", page)
-    #             if video_ids:
-    #                 video_url = f'https://www.youtube.com/watch?v={video_ids[0]}'
-    #                 await process_play_command(interaction, video_url)
-    #             else:
-    #                 await interaction.response.send_message('No results found.')
 
 def run_bot():
     load_dotenv()
