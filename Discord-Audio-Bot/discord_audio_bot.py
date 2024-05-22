@@ -336,24 +336,27 @@ class ButtonView(discord.ui.View):
         self.stop_button_id = f"stop-{uuid.uuid4()}"
         self.skip_button_id = f"skip-{uuid.uuid4()}"
         self.restart_button_id = f"restart-{uuid.uuid4()}"
-        self.shuffle_button_id = f"shuffle-{uuid.uuid4()}"  # New Shuffle button ID
-        self.list_queue_button_id = f"list_queue-{uuid.uuid4()}"  # New List Queue button ID
+        self.shuffle_button_id = f"shuffle-{uuid.uuid4()}"
+        self.list_queue_button_id = f"list_queue-{uuid.uuid4()}"
+        self.remove_button_id = f"remove-{uuid.uuid4()}"  # New Remove button ID
 
         self.pause_button = discord.ui.Button(label="Pause", style=discord.ButtonStyle.primary, custom_id=self.pause_button_id)
         self.resume_button = discord.ui.Button(label="Resume", style=discord.ButtonStyle.primary, custom_id=self.resume_button_id)
         self.stop_button = discord.ui.Button(label="Stop", style=discord.ButtonStyle.danger, custom_id=self.stop_button_id)
         self.skip_button = discord.ui.Button(label="Skip", style=discord.ButtonStyle.secondary, custom_id=self.skip_button_id)
         self.restart_button = discord.ui.Button(label="Restart", style=discord.ButtonStyle.secondary, custom_id=self.restart_button_id)
-        self.shuffle_button = discord.ui.Button(label="Shuffle", style=discord.ButtonStyle.secondary, custom_id=self.shuffle_button_id)  # New Shuffle button
-        self.list_queue_button = discord.ui.Button(label="List Queue", style=discord.ButtonStyle.secondary, custom_id=self.list_queue_button_id)  # New List Queue button
+        self.shuffle_button = discord.ui.Button(label="Shuffle", style=discord.ButtonStyle.secondary, custom_id=self.shuffle_button_id)
+        self.list_queue_button = discord.ui.Button(label="List Queue", style=discord.ButtonStyle.secondary, custom_id=self.list_queue_button_id)
+        self.remove_button = discord.ui.Button(label="Remove", style=discord.ButtonStyle.danger, custom_id=self.remove_button_id)  # New Remove button
 
         self.pause_button.callback = self.pause_button_callback
         self.resume_button.callback = self.resume_button_callback
         self.stop_button.callback = self.stop_button_callback
         self.skip_button.callback = self.skip_button_callback
         self.restart_button.callback = self.restart_button_callback
-        self.shuffle_button.callback = self.shuffle_button_callback  # Set callback for the Shuffle button
-        self.list_queue_button.callback = self.list_queue_button_callback  # Set callback for the List Queue button
+        self.shuffle_button.callback = self.shuffle_button_callback
+        self.list_queue_button.callback = self.list_queue_button_callback
+        self.remove_button.callback = self.remove_button_callback  # Set callback for the Remove button
 
         self.update_buttons()
 
@@ -369,8 +372,9 @@ class ButtonView(discord.ui.View):
         self.add_item(self.stop_button)
         self.add_item(self.skip_button)
         self.add_item(self.restart_button)
-        self.add_item(self.shuffle_button)  # Add the Shuffle button to the view
-        self.add_item(self.list_queue_button)  # Add the List Queue button to the view
+        self.add_item(self.shuffle_button)
+        self.add_item(self.list_queue_button)
+        self.add_item(self.remove_button)  # Add the Remove button to the view
 
     async def pause_button_callback(self, interaction: discord.Interaction):
         if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
@@ -430,8 +434,8 @@ class ButtonView(discord.ui.View):
             await interaction.response.send_message("The queue is currently empty.")
             return
 
-        random.shuffle(queue)
         queue_manager.has_been_shuffled = True
+        random.shuffle(queue)
         queue_manager.queues[today_str] = queue
         queue_manager.save_queues()
 
@@ -453,6 +457,23 @@ class ButtonView(discord.ui.View):
             for chunk in chunks:
                 await interaction.response.send_message(chunk)
             await self.send_now_playing(interaction, queue[0])
+    async def remove_button_callback(self, interaction: discord.Interaction):
+        if not queue_manager.currently_playing:
+            await interaction.response.send_message("No track is currently playing.", ephemeral=True)
+            return
+
+        current_entry = queue_manager.currently_playing
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        queue = queue_manager.get_queue(today_str)
+
+        if current_entry in queue:
+            queue.remove(current_entry)
+            queue_manager.save_queues()
+
+        if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
+            interaction.guild.voice_client.stop()
+            queue_manager.currently_playing = None
+            await interaction.response.send_message(f"Removed '{current_entry.title}' from the queue and stopped playback.", ephemeral=True)
 
     async def send_now_playing(self, interaction, entry, paused=False, stopped=False):
         if stopped:
@@ -573,7 +594,8 @@ class MusicCommands(commands.Cog):
         **/shuffle** - Randomly shuffles the queue and shows the new order.
         **/list_queue** - Lists all entries currently in the queue.
         **/play_queue** - Starts playing the queue from the first track.
-        **/remove [title]** - Removes a specific track by title from the queue.
+        **/remove_by_title [title]** - Removes a specific track by title from the queue.
+        **/remove_queue [index]** - Removes a track by its index in the queue.
         **/skip** - Skips the current track and plays the next one in the queue.
         **/pause** - Pauses the currently playing track.
         **/resume** - Resumes playback if it's paused.
@@ -606,10 +628,12 @@ class MusicCommands(commands.Cog):
                 if 'Discord-Audio-Bot\\Discord-Audio-Bot\\downloaded-mp3s' in entry.best_audio_url:
                     logging.info(f'Moving {entry.title} to the front of the queue.')
                     queue.insert(0, entry)
+                    queue_manager.save_queues()
                     interaction.guild.voice_client.stop()
                 else:
                     logging.info(f'Moving {entry.title} to second in position.')
-                    queue.insert(1, entry)
+                    queue.insert(0, entry)
+                    queue_manager.save_queues()
                 interaction.guild.voice_client.stop()
                 await asyncio.sleep(1)
 
@@ -624,8 +648,8 @@ class MusicCommands(commands.Cog):
 
         await interaction.followup.send(f"Playing video: {title}")
 
-    @app_commands.command(name='remove', description='Remove a track from the queue by title.')
-    async def remove(self, interaction: discord.Interaction, title: str):
+    @app_commands.command(name='remove_by_title', description='Remove a track from the queue by title.')
+    async def remove_by_title(self, interaction: discord.Interaction, title: str):
         today_str = datetime.now().strftime('%Y-%m-%d')
         queue = queue_manager.get_queue(today_str)
         if not queue:
@@ -649,8 +673,8 @@ class MusicCommands(commands.Cog):
             await interaction.response.send_message("The queue is currently empty.")
             return
 
-        random.shuffle(queue)
         queue_manager.has_been_shuffled = True
+        random.shuffle(queue)
         queue_manager.queues[today_str] = queue
         queue_manager.save_queues()
 
