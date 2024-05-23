@@ -20,7 +20,7 @@ from discord import Attachment
 logging.basicConfig(level=logging.INFO, filename='queue_log.log', format='%(asctime)s:%(levelname)s:%(message)s')
 
 class QueueEntry:
-    def __init__(self, video_url: str, best_audio_url: str, title: str, is_playlist: bool, thumbnail: str = '', playlist_index: Optional[int] = None, duration: int = 0):
+    def __init__(self, video_url: str, best_audio_url: str, title: str, is_playlist: bool, thumbnail: str = '', playlist_index: Optional[int] = None, duration: int = 0, is_favorited: bool = False, favorited_by: Optional[List[int]] = None):
         self.video_url = video_url
         self.best_audio_url = best_audio_url
         self.title = title
@@ -28,6 +28,8 @@ class QueueEntry:
         self.playlist_index = playlist_index
         self.thumbnail = thumbnail
         self.duration = duration
+        self.is_favorited = is_favorited  # New property to indicate if the entry is favorited
+        self.favorited_by = favorited_by if favorited_by is not None else []  # List of users who favorited the entry
 
     def to_dict(self):
         return {
@@ -36,7 +38,9 @@ class QueueEntry:
             'title': self.title,
             'is_playlist': self.is_playlist,
             'playlist_index': self.playlist_index,
-            'thumbnail': self.thumbnail
+            'thumbnail': self.thumbnail,
+            'is_favorited': self.is_favorited,  # Save favorite status
+            'favorited_by': self.favorited_by  # Save list of users who favorited
         }
 
 class BotQueue:
@@ -48,6 +52,8 @@ class BotQueue:
         self.is_restarting = False
         self.has_been_shuffled = False
         self.stop_is_triggered = False
+        self.loop = False  # New property to manage looping
+
 
     def load_queues(self) -> Dict[str, List[QueueEntry]]:
         try:
@@ -150,10 +156,15 @@ async def play_audio(interaction, entry):
             asyncio.run_coroutine_threadsafe(interaction.channel.send("Error occurred during playback."), interaction.client.loop).result()
         else:
             logging.info(f"Finished playing {entry.title} at {datetime.now()}")
-            if not queue_manager.is_restarting:
-                queue_manager.last_played_audio = entry.title
-            queue_manager.save_queues()
-            asyncio.run_coroutine_threadsafe(play_next(interaction), interaction.client.loop).result()
+            if queue_manager.loop:
+                logging.info(f"Looping {entry.title}")
+                asyncio.run_coroutine_threadsafe(play_audio(interaction, entry), interaction.client.loop).result()
+            else:
+                if not queue_manager.is_restarting:
+                    queue_manager.last_played_audio = entry.title
+                queue_manager.save_queues()
+                # asyncio.run_coroutine_threadsafe(disable_buttons(interaction, entry), interaction.client.loop).result()
+                asyncio.run_coroutine_threadsafe(play_next(interaction), interaction.client.loop).result()
 
     async def start_playback():
         try:
@@ -183,12 +194,13 @@ async def play_audio(interaction, entry):
 
     await start_playback()
 
-async def send_now_playing(interaction, entry):
+async def send_now_playing(interaction, entry, paused=False):
     embed = discord.Embed(title="Now Playing", description=entry.title, url=entry.video_url)
     embed.set_thumbnail(url=entry.thumbnail)
     embed.add_field(name="URL", value=entry.video_url, inline=False)
+    embed.add_field(name="Favorited by", value=', '.join([str(user_id) for user_id in entry.favorited_by]), inline=False)
 
-    view = ButtonView(interaction.client)
+    view = ButtonView(interaction.client, entry, paused=paused)
     message = await interaction.channel.send(embed=embed, view=view)
     await update_progress_bar(interaction, message, entry)
 
@@ -313,12 +325,28 @@ async def handle_single_video(interaction, info):
     queue_manager.add_to_queue(entry)
     await play_audio(interaction, entry)
 
+# async def disable_buttons(interaction, entry):
+#     embed = discord.Embed(title="Now Playing", description=entry.title, url=entry.video_url)
+#     embed.set_thumbnail(url=entry.thumbnail)
+#     embed.add_field(name="URL", value=entry.video_url, inline=False)
+#     embed.add_field(name="Favorited by", value=', '.join([str(user_id) for user_id in entry.favorited_by]), inline=False)
+
+#     view = ButtonView(interaction.client, entry, paused=False, disable_all=True)
+#     await interaction.message.edit(embed=embed, view=view)
+async def disable_buttons(interaction, entry):
+    message = await interaction.original_message()
+    view = message.components[0].view
+    view.disable_all_buttons()
+    await message.edit(view=view)
+
 class AudioBot(commands.Bot):
     def __init__(self, command_prefix, intents):
         super().__init__(command_prefix, intents=intents)
 
     async def setup_hook(self):
-        self.add_view(ButtonView(self))
+        # Initialize ButtonView with a dummy entry; this line can be adjusted as per your actual initialization logic
+        dummy_entry = QueueEntry(video_url='', best_audio_url='', title='dummy', is_playlist=False)
+        self.add_view(ButtonView(self, dummy_entry))
         await self.tree.sync()
 
     async def on_ready(self):
@@ -326,10 +354,11 @@ class AudioBot(commands.Bot):
         print(f'{self.user} is now connected and ready.')
 
 class ButtonView(discord.ui.View):
-    def __init__(self, bot, paused: bool = False):
+    def __init__(self, bot, entry: QueueEntry, paused: bool = False):
         super().__init__(timeout=None)
         self.bot = bot
         self.paused = paused
+        self.entry = entry  # Store the entry being played
 
         self.pause_button_id = f"pause-{uuid.uuid4()}"
         self.resume_button_id = f"resume-{uuid.uuid4()}"
@@ -339,17 +368,20 @@ class ButtonView(discord.ui.View):
         self.shuffle_button_id = f"shuffle-{uuid.uuid4()}"
         self.list_queue_button_id = f"list_queue-{uuid.uuid4()}"
         self.remove_button_id = f"remove-{uuid.uuid4()}"
-        self.previous_button_id = f"previous-{uuid.uuid4()}"  # New Previous button ID
+        self.previous_button_id = f"previous-{uuid.uuid4()}"
+        self.favorite_button_id = f"favorite-{uuid.uuid4()}"
+        self.loop_button_id = f"loop-{uuid.uuid4()}"  # New loop button
 
-        self.pause_button = discord.ui.Button(label="Pause", style=discord.ButtonStyle.primary, custom_id=self.pause_button_id)
-        self.resume_button = discord.ui.Button(label="Resume", style=discord.ButtonStyle.primary, custom_id=self.resume_button_id)
-        self.stop_button = discord.ui.Button(label="Stop", style=discord.ButtonStyle.danger, custom_id=self.stop_button_id)
-        self.skip_button = discord.ui.Button(label="Skip", style=discord.ButtonStyle.secondary, custom_id=self.skip_button_id)
-        self.restart_button = discord.ui.Button(label="Restart", style=discord.ButtonStyle.secondary, custom_id=self.restart_button_id)
-        self.shuffle_button = discord.ui.Button(label="Shuffle", style=discord.ButtonStyle.secondary, custom_id=self.shuffle_button_id)
-        self.list_queue_button = discord.ui.Button(label="List Queue", style=discord.ButtonStyle.secondary, custom_id=self.list_queue_button_id)
-        self.remove_button = discord.ui.Button(label="Remove", style=discord.ButtonStyle.danger, custom_id=self.remove_button_id)
-        self.previous_button = discord.ui.Button(label="Previous", style=discord.ButtonStyle.secondary, custom_id=self.previous_button_id)  # New Previous button
+        self.pause_button = discord.ui.Button(label="⏸️ Pause", style=discord.ButtonStyle.primary, custom_id=self.pause_button_id)
+        self.resume_button = discord.ui.Button(label="▶️ Resume", style=discord.ButtonStyle.primary, custom_id=self.resume_button_id)
+        self.stop_button = discord.ui.Button(label="⏹️ Stop", style=discord.ButtonStyle.danger, custom_id=self.stop_button_id)
+        self.skip_button = discord.ui.Button(label="⏭️ Skip", style=discord.ButtonStyle.secondary, custom_id=self.skip_button_id)
+        self.restart_button = discord.ui.Button(label="🔄 Restart", style=discord.ButtonStyle.secondary, custom_id=self.restart_button_id)
+        self.shuffle_button = discord.ui.Button(label="🔀 Shuffle", style=discord.ButtonStyle.secondary, custom_id=self.shuffle_button_id)
+        self.list_queue_button = discord.ui.Button(label="📜 List Queue", style=discord.ButtonStyle.secondary, custom_id=self.list_queue_button_id)
+        self.remove_button = discord.ui.Button(label="❌ Remove", style=discord.ButtonStyle.danger, custom_id=self.remove_button_id)
+        self.previous_button = discord.ui.Button(label="⏮️ Previous", style=discord.ButtonStyle.secondary, custom_id=self.previous_button_id)
+        self.loop_button = discord.ui.Button(label="🔁 Loop", style=discord.ButtonStyle.secondary, custom_id=self.loop_button_id)  # New loop button
 
         self.pause_button.callback = self.pause_button_callback
         self.resume_button.callback = self.resume_button_callback
@@ -359,14 +391,20 @@ class ButtonView(discord.ui.View):
         self.shuffle_button.callback = self.shuffle_button_callback
         self.list_queue_button.callback = self.list_queue_button_callback
         self.remove_button.callback = self.remove_button_callback
-        self.previous_button.callback = self.previous_button_callback 
+        self.previous_button.callback = self.previous_button_callback
+        self.loop_button.callback = self.loop_button_callback  # New loop button callback
+
+        self.favorite_button = discord.ui.Button(
+            label="⭐ Favorite" if not self.entry.is_favorited else "💛 Favorited",
+            style=discord.ButtonStyle.secondary if not self.entry.is_favorited else discord.ButtonStyle.primary,
+            custom_id=self.favorite_button_id
+        )
+        self.favorite_button.callback = self.favorite_button_callback
 
         self.update_buttons()
 
     def update_buttons(self):
-        """Updates the buttons based on the state of the voice client."""
-        self.clear_items()  # Clear all buttons before updating
-
+        self.clear_items()
         if self.paused:
             self.add_item(self.resume_button)
         else:
@@ -375,21 +413,79 @@ class ButtonView(discord.ui.View):
         self.add_item(self.stop_button)
         self.add_item(self.skip_button)
         self.add_item(self.restart_button)
-        self.add_item(self.shuffle_button)  # Add the Shuffle button to the view
-        self.add_item(self.list_queue_button)  # Add the List Queue button to the view
+        self.add_item(self.shuffle_button)
+        self.add_item(self.list_queue_button)
         self.add_item(self.remove_button)
         self.add_item(self.previous_button)
+        self.add_item(self.favorite_button)
+        self.loop_button.label = "🔁 Looped" if queue_manager.loop else "🔁 Loop"  # Update loop button label
+        self.add_item(self.loop_button)
+
+    def disable_all_buttons(self):
+        self.pause_button.disabled = True
+        self.resume_button.disabled = True
+        self.stop_button.disabled = True
+        self.skip_button.disabled = True
+        self.restart_button.disabled = True
+        self.shuffle_button.disabled = True
+        self.list_queue_button.disabled = True
+        self.previous_button.disabled = True
+        self.loop_button.disabled = True
+        self.favorite_button.disabled = False  # Keep the favorite button active
+        self.remove_button.disabled = False  # Keep the remove button active
+
+        self.update_buttons()
+
+    async def loop_button_callback(self, interaction: discord.Interaction):
+        if queue_manager.currently_playing:
+            queue_manager.loop = not queue_manager.loop
+            self.loop_button.label = "🔁 Looped" if queue_manager.loop else "🔁 Loop"
+            await interaction.response.send_message(f"Looping {'enabled' if queue_manager.loop else 'disabled'}.")
+            logging.info(f"Looping {'enabled' if queue_manager.loop else 'disabled'} for {queue_manager.currently_playing.title}")
+            self.update_buttons()
+            await interaction.message.edit(view=self)
+        else:
+            await interaction.response.send_message("No track is currently playing.", ephemeral=True)
+
+    async def favorite_button_callback(self, interaction: discord.Interaction):
+        user_id = interaction.user.id
+        if user_id in self.entry.favorited_by:
+            self.entry.favorited_by.remove(user_id)
+            self.entry.is_favorited = False
+            self.favorite_button.style = discord.ButtonStyle.secondary  # Grey out the button
+            self.favorite_button.label = "⭐ Favorite"
+        else:
+            self.entry.favorited_by.append(user_id)
+            self.entry.is_favorited = True
+            self.favorite_button.style = discord.ButtonStyle.primary  # Highlight the button
+            self.favorite_button.label = "💛 Favorited"
+
+        queue_manager.save_queues()
+        await interaction.response.send_message(f"{'Added to' if self.entry.is_favorited else 'Removed from'} favorites.", ephemeral=True)
+        await self.update_now_playing(interaction)
+
+    async def update_now_playing(self, interaction: discord.Interaction):
+        embed = discord.Embed(title="Now Playing", description=self.entry.title, url=self.entry.video_url)
+        embed.set_thumbnail(url=self.entry.thumbnail)
+        embed.add_field(name="URL", value=self.entry.video_url, inline=False)
+        embed.add_field(name="Favorited by", value=', '.join([str(user_id) for user_id in self.entry.favorited_by]), inline=False)
+
+        await interaction.message.edit(embed=embed, view=self)
 
     async def pause_button_callback(self, interaction: discord.Interaction):
         if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
             interaction.guild.voice_client.pause()
-            await self.send_now_playing(interaction, queue_manager.currently_playing, paused=True)
+            self.paused = True
+            self.update_buttons()
+            await interaction.message.edit(view=self)
             await interaction.response.send_message('Playback paused.', ephemeral=True)
 
     async def resume_button_callback(self, interaction: discord.Interaction):
         if interaction.guild.voice_client and interaction.guild.voice_client.is_paused():
             interaction.guild.voice_client.resume()
-            await self.send_now_playing(interaction, queue_manager.currently_playing, paused=False)
+            self.paused = False
+            self.update_buttons()
+            await interaction.message.edit(view=self)
             await interaction.response.send_message('Playback resumed.', ephemeral=True)
 
     async def stop_button_callback(self, interaction: discord.Interaction):
@@ -447,7 +543,7 @@ class ButtonView(discord.ui.View):
         titles = [entry.title for entry in queue]
         response = "Queue after shuffle:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
         await interaction.response.send_message(response)
-        await self.send_now_playing(interaction, first_entry_before_shuffle)
+        await self.update_now_playing(interaction)
 
     async def list_queue_button_callback(self, interaction: discord.Interaction):
         queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
@@ -462,28 +558,23 @@ class ButtonView(discord.ui.View):
 
             for chunk in chunks:
                 await interaction.response.send_message(chunk)
-            await self.send_now_playing(interaction, queue[0])
+            await self.update_now_playing(interaction)
 
     async def remove_button_callback(self, interaction: discord.Interaction):
-        if not queue_manager.currently_playing:
-            await interaction.response.send_message("No track is currently playing.", ephemeral=True)
-            return
-
-        current_entry = queue_manager.currently_playing
         today_str = datetime.now().strftime('%Y-%m-%d')
         queue = queue_manager.get_queue(today_str)
-
-        if current_entry in queue:
-            queue.remove(current_entry)
+        if self.entry in queue:
+            queue.remove(self.entry)
             queue_manager.save_queues()
+            await interaction.response.send_message(f"Removed '{self.entry.title}' from the queue.", ephemeral=True)
 
-        if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
+        if interaction.guild.voice_client and interaction.guild.voice_client.is_playing() and queue_manager.currently_playing == self.entry:
             interaction.guild.voice_client.stop()
             queue_manager.currently_playing = None
-            await interaction.response.send_message(f"Removed '{current_entry.title}' from the queue and stopped playback.", ephemeral=True)
-    
+            await interaction.response.send_message(f"Stopped playback and removed '{self.entry.title}' from the queue.", ephemeral=True)
+
     async def previous_button_callback(self, interaction: discord.Interaction):
-        await interaction.response.defer()  # Defer the response to give time for processing
+        await interaction.response.defer()
 
         last_played = queue_manager.last_played_audio
         if not last_played:
@@ -504,36 +595,34 @@ class ButtonView(discord.ui.View):
         if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
             interaction.guild.voice_client.stop()
             await asyncio.sleep(0.5)
-            # await play_audio(interaction, entry)
-            # await self.send_now_playing(interaction, entry)
+            await play_audio(interaction, entry)
+            await self.update_now_playing(interaction)
 
-    async def send_now_playing(self, interaction, entry, paused=False, stopped=False):
-        if stopped:
-            await interaction.channel.send("Playback stopped.")
-            return
-        
-        embed = discord.Embed(title="Now Playing", description=entry.title, url=entry.video_url)
-        embed.set_thumbnail(url=entry.thumbnail)
-        embed.add_field(name="URL", value=entry.video_url, inline=False)
+### 3. Modify the `send_now_playing` method:
+# Reflect the favorite status in the embed message and update the button color.
 
-        view = ButtonView(interaction.client, paused=paused)
-        await interaction.channel.send(embed=embed, view=view)
+async def send_now_playing(interaction, entry, paused=False):
+    embed = discord.Embed(title="Now Playing", description=entry.title, url=entry.video_url)
+    embed.set_thumbnail(url=entry.thumbnail)
+    embed.add_field(name="URL", value=entry.video_url, inline=False)
+    embed.add_field(name="Favorited by", value=', '.join([str(user_id) for user_id in entry.favorited_by]), inline=False)
 
-    async def send_now_playing(self, interaction, entry, paused=False, stopped=False):
-        if stopped:
-            await interaction.channel.send("Playback stopped.")
-            return
-        
-        embed = discord.Embed(title="Now Playing", description=entry.title, url=entry.video_url)
-        embed.set_thumbnail(url=entry.thumbnail)
-        embed.add_field(name="URL", value=entry.video_url, inline=False)
-
-        view = ButtonView(interaction.client, paused=paused)
-        await interaction.channel.send(embed=embed, view=view)
+    view = ButtonView(interaction.client, entry, paused=paused)
+    message = await interaction.channel.send(embed=embed, view=view)
+    await update_progress_bar(interaction, message, entry)
 
 class MusicCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        
+    @app_commands.command(name='loop', description='Toggle looping of the current track.')
+    async def loop(self, interaction: discord.Interaction):
+        if queue_manager.currently_playing:
+            queue_manager.loop = not queue_manager.loop
+            await interaction.response.send_message(f"Looping {'enabled' if queue_manager.loop else 'disabled'}.")
+            logging.info(f"Looping {'enabled' if queue_manager.loop else 'disabled'} for {queue_manager.currently_playing.title}")
+        else:
+            await interaction.response.send_message("No track is currently playing.")
 
     @app_commands.command(name='play', description='Play a URL or attached MP3 file.')
     async def play(self, interaction: discord.Interaction, url: str = None, mp3_file: Optional[Attachment] = None):
@@ -615,8 +704,7 @@ class MusicCommands(commands.Cog):
         if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
             interaction.guild.voice_client.stop()
             await asyncio.sleep(0.5)
-            # await play_audio(interaction, entry)
-            await self.bot.get_cog('ButtonView').send_now_playing(interaction, entry)
+            await send_now_playing(interaction, entry, paused=False)
 
     @app_commands.command(name='help', description='Show the help text.')
     async def help_command(self, interaction: discord.Interaction):
@@ -661,13 +749,11 @@ class MusicCommands(commands.Cog):
                 if 'Discord-Audio-Bot\\Discord-Audio-Bot\\downloaded-mp3s' in entry.best_audio_url:
                     logging.info(f'Moving {entry.title} to the front of the queue.')
                     queue.insert(0, entry)
-                    # queue_manager.save_queues()
                     interaction.guild.voice_client.stop()
                 else:
                     logging.info(f'Moving {entry.title} to second in position.')
                     queue.insert(1, entry)
-                    # queue_manager.save_queues()
-                interaction.guild.voice_client.stop()
+                    interaction.guild.voice_client.stop()
                 await asyncio.sleep(1)
 
         if not interaction.guild.voice_client:
@@ -705,6 +791,7 @@ class MusicCommands(commands.Cog):
         if not queue:
             await interaction.response.send_message("The queue is currently empty.")
             return
+        first_entry_before_shuffle  = queue_manager.currently_playing
 
         queue_manager.has_been_shuffled = True
         random.shuffle(queue)
@@ -714,6 +801,7 @@ class MusicCommands(commands.Cog):
         titles = [entry.title for entry in queue]
         response = "Queue after shuffle:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
         await interaction.response.send_message(response)
+        await self.send_now_playing(interaction, first_entry_before_shuffle)
 
     @app_commands.command(name='play_queue', description='Play the current queue.')
     async def play_queue(self, interaction: discord.Interaction):
@@ -784,6 +872,11 @@ class MusicCommands(commands.Cog):
     async def pause(self, interaction: discord.Interaction):
         if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
             interaction.guild.voice_client.pause()
+            message = await interaction.original_message()
+            view = message.components[0].view
+            view.paused = True
+            view.update_buttons()
+            await message.edit(view=view)
             await interaction.response.send_message('Playback paused.')
             logging.info("Playback paused.")
             print("Playback paused.")
@@ -792,6 +885,11 @@ class MusicCommands(commands.Cog):
     async def resume(self, interaction: discord.Interaction):
         if interaction.guild.voice_client and interaction.guild.voice_client.is_paused():
             interaction.guild.voice_client.resume()
+            message = await interaction.original_message()
+            view = message.components[0].view
+            view.paused = False
+            view.update_buttons()
+            await message.edit(view=view)
             await interaction.response.send_message('Playback resumed.')
             logging.info("Playback resumed.")
             print("Playback resumed.")
