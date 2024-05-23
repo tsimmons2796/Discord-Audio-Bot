@@ -28,8 +28,8 @@ class QueueEntry:
         self.playlist_index = playlist_index
         self.thumbnail = thumbnail
         self.duration = duration
-        self.is_favorited = is_favorited  # New property to indicate if the entry is favorited
-        self.favorited_by = favorited_by if favorited_by is not None else []  # List of users who favorited the entry
+        self.is_favorited = is_favorited
+        self.favorited_by = favorited_by if favorited_by is not None else []
 
     def to_dict(self):
         return {
@@ -39,8 +39,8 @@ class QueueEntry:
             'is_playlist': self.is_playlist,
             'playlist_index': self.playlist_index,
             'thumbnail': self.thumbnail,
-            'is_favorited': self.is_favorited,  # Save favorite status
-            'favorited_by': self.favorited_by  # Save list of users who favorited
+            'is_favorited': self.is_favorited,
+            'favorited_by': self.favorited_by
         }
 
 class BotQueue:
@@ -52,8 +52,7 @@ class BotQueue:
         self.is_restarting = False
         self.has_been_shuffled = False
         self.stop_is_triggered = False
-        self.loop = False  # New property to manage looping
-
+        self.loop = False
 
     def load_queues(self) -> Dict[str, List[QueueEntry]]:
         try:
@@ -163,7 +162,6 @@ async def play_audio(interaction, entry):
                 if not queue_manager.is_restarting:
                     queue_manager.last_played_audio = entry.title
                 queue_manager.save_queues()
-                # asyncio.run_coroutine_threadsafe(disable_buttons(interaction, entry), interaction.client.loop).result()
                 asyncio.run_coroutine_threadsafe(play_next(interaction), interaction.client.loop).result()
 
     async def start_playback():
@@ -205,7 +203,7 @@ async def send_now_playing(interaction, entry, paused=False):
     await update_progress_bar(interaction, message, entry)
 
 async def update_progress_bar(interaction, message, entry):
-    duration = entry.duration if hasattr(entry, 'duration') else 300  # default to 5 minutes if duration is not available
+    duration = entry.duration if hasattr(entry, 'duration') else 300
     start_time = datetime.now()
     while True:
         elapsed = (datetime.now() - start_time).seconds
@@ -325,26 +323,11 @@ async def handle_single_video(interaction, info):
     queue_manager.add_to_queue(entry)
     await play_audio(interaction, entry)
 
-# async def disable_buttons(interaction, entry):
-#     embed = discord.Embed(title="Now Playing", description=entry.title, url=entry.video_url)
-#     embed.set_thumbnail(url=entry.thumbnail)
-#     embed.add_field(name="URL", value=entry.video_url, inline=False)
-#     embed.add_field(name="Favorited by", value=', '.join([str(user_id) for user_id in entry.favorited_by]), inline=False)
-
-#     view = ButtonView(interaction.client, entry, paused=False, disable_all=True)
-#     await interaction.message.edit(embed=embed, view=view)
-async def disable_buttons(interaction, entry):
-    message = await interaction.original_message()
-    view = message.components[0].view
-    view.disable_all_buttons()
-    await message.edit(view=view)
-
 class AudioBot(commands.Bot):
     def __init__(self, command_prefix, intents):
         super().__init__(command_prefix, intents=intents)
 
     async def setup_hook(self):
-        # Initialize ButtonView with a dummy entry; this line can be adjusted as per your actual initialization logic
         dummy_entry = QueueEntry(video_url='', best_audio_url='', title='dummy', is_playlist=False)
         self.add_view(ButtonView(self, dummy_entry))
         await self.tree.sync()
@@ -358,7 +341,7 @@ class ButtonView(discord.ui.View):
         super().__init__(timeout=None)
         self.bot = bot
         self.paused = paused
-        self.entry = entry  # Store the entry being played
+        self.entry = entry
 
         self.pause_button_id = f"pause-{uuid.uuid4()}"
         self.resume_button_id = f"resume-{uuid.uuid4()}"
@@ -370,7 +353,9 @@ class ButtonView(discord.ui.View):
         self.remove_button_id = f"remove-{uuid.uuid4()}"
         self.previous_button_id = f"previous-{uuid.uuid4()}"
         self.favorite_button_id = f"favorite-{uuid.uuid4()}"
-        self.loop_button_id = f"loop-{uuid.uuid4()}"  # New loop button
+        self.loop_button_id = f"loop-{uuid.uuid4()}"
+        self.move_up_button_id = f"move_up-{uuid.uuid4()}"
+        self.move_down_button_id = f"move_down-{uuid.uuid4()}"
 
         self.pause_button = discord.ui.Button(label="⏸️ Pause", style=discord.ButtonStyle.primary, custom_id=self.pause_button_id)
         self.resume_button = discord.ui.Button(label="▶️ Resume", style=discord.ButtonStyle.primary, custom_id=self.resume_button_id)
@@ -381,7 +366,9 @@ class ButtonView(discord.ui.View):
         self.list_queue_button = discord.ui.Button(label="📜 List Queue", style=discord.ButtonStyle.secondary, custom_id=self.list_queue_button_id)
         self.remove_button = discord.ui.Button(label="❌ Remove", style=discord.ButtonStyle.danger, custom_id=self.remove_button_id)
         self.previous_button = discord.ui.Button(label="⏮️ Previous", style=discord.ButtonStyle.secondary, custom_id=self.previous_button_id)
-        self.loop_button = discord.ui.Button(label="🔁 Loop", style=discord.ButtonStyle.secondary, custom_id=self.loop_button_id)  # New loop button
+        self.loop_button = discord.ui.Button(label="🔁 Loop", style=discord.ButtonStyle.secondary, custom_id=self.loop_button_id)
+        self.move_up_button = discord.ui.Button(label="⬆️ Move Up", style=discord.ButtonStyle.secondary, custom_id=self.move_up_button_id)
+        self.move_down_button = discord.ui.Button(label="⬇️ Move Down", style=discord.ButtonStyle.secondary, custom_id=self.move_down_button_id)
 
         self.pause_button.callback = self.pause_button_callback
         self.resume_button.callback = self.resume_button_callback
@@ -392,7 +379,9 @@ class ButtonView(discord.ui.View):
         self.list_queue_button.callback = self.list_queue_button_callback
         self.remove_button.callback = self.remove_button_callback
         self.previous_button.callback = self.previous_button_callback
-        self.loop_button.callback = self.loop_button_callback  # New loop button callback
+        self.loop_button.callback = self.loop_button_callback
+        self.move_up_button.callback = self.move_up_button_callback
+        self.move_down_button.callback = self.move_down_button_callback
 
         self.favorite_button = discord.ui.Button(
             label="⭐ Favorite" if not self.entry.is_favorited else "💛 Favorited",
@@ -418,7 +407,9 @@ class ButtonView(discord.ui.View):
         self.add_item(self.remove_button)
         self.add_item(self.previous_button)
         self.add_item(self.favorite_button)
-        self.loop_button.label = "🔁 Looped" if queue_manager.loop else "🔁 Loop"  # Update loop button label
+        self.add_item(self.move_up_button)
+        self.add_item(self.move_down_button)
+        self.loop_button.label = "🔁 Looped" if queue_manager.loop else "🔁 Loop"
         self.add_item(self.loop_button)
 
     def disable_all_buttons(self):
@@ -431,8 +422,10 @@ class ButtonView(discord.ui.View):
         self.list_queue_button.disabled = True
         self.previous_button.disabled = True
         self.loop_button.disabled = True
-        self.favorite_button.disabled = False  # Keep the favorite button active
-        self.remove_button.disabled = False  # Keep the remove button active
+        self.favorite_button.disabled = False
+        self.remove_button.disabled = False
+        self.move_up_button.disabled = True
+        self.move_down_button.disabled = True
 
         self.update_buttons()
 
@@ -452,12 +445,12 @@ class ButtonView(discord.ui.View):
         if user_id in self.entry.favorited_by:
             self.entry.favorited_by.remove(user_id)
             self.entry.is_favorited = False
-            self.favorite_button.style = discord.ButtonStyle.secondary  # Grey out the button
+            self.favorite_button.style = discord.ButtonStyle.secondary
             self.favorite_button.label = "⭐ Favorite"
         else:
             self.entry.favorited_by.append(user_id)
             self.entry.is_favorited = True
-            self.favorite_button.style = discord.ButtonStyle.primary  # Highlight the button
+            self.favorite_button.style = discord.ButtonStyle.primary
             self.favorite_button.label = "💛 Favorited"
 
         queue_manager.save_queues()
@@ -533,7 +526,7 @@ class ButtonView(discord.ui.View):
         if not queue:
             await interaction.response.send_message("The queue is currently empty.")
             return
-        first_entry_before_shuffle  = queue_manager.currently_playing
+        first_entry_before_shuffle = queue_manager.currently_playing
 
         queue_manager.has_been_shuffled = True
         random.shuffle(queue)
@@ -543,7 +536,7 @@ class ButtonView(discord.ui.View):
         titles = [entry.title for entry in queue]
         response = "Queue after shuffle:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
         await interaction.response.send_message(response)
-        await self.update_now_playing(interaction)
+        await send_now_playing(interaction, first_entry_before_shuffle)
 
     async def list_queue_button_callback(self, interaction: discord.Interaction):
         queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
@@ -558,7 +551,7 @@ class ButtonView(discord.ui.View):
 
             for chunk in chunks:
                 await interaction.response.send_message(chunk)
-            await self.update_now_playing(interaction)
+            await send_now_playing(interaction, queue_manager.currently_playing)
 
     async def remove_button_callback(self, interaction: discord.Interaction):
         today_str = datetime.now().strftime('%Y-%m-%d')
@@ -598,8 +591,31 @@ class ButtonView(discord.ui.View):
             await play_audio(interaction, entry)
             await self.update_now_playing(interaction)
 
-### 3. Modify the `send_now_playing` method:
-# Reflect the favorite status in the embed message and update the button color.
+    async def move_up_button_callback(self, interaction: discord.Interaction):
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        queue = queue_manager.get_queue(today_str)
+        entry_index = queue.index(self.entry)
+        
+        if entry_index > 0:
+            queue.insert(entry_index - 1, queue.pop(entry_index))
+            queue_manager.save_queues()
+            await interaction.response.send_message(f"Moved '{self.entry.title}' up in the queue.", ephemeral=True)
+            await self.update_now_playing(interaction)
+        else:
+            await interaction.response.send_message(f"'{self.entry.title}' is already at the top of the queue.", ephemeral=True)
+
+    async def move_down_button_callback(self, interaction: discord.Interaction):
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        queue = queue_manager.get_queue(today_str)
+        entry_index = queue.index(self.entry)
+        
+        if entry_index < len(queue) - 1:
+            queue.insert(entry_index + 1, queue.pop(entry_index))
+            queue_manager.save_queues()
+            await interaction.response.send_message(f"Moved '{self.entry.title}' down in the queue.", ephemeral=True)
+            await self.update_now_playing(interaction)
+        else:
+            await interaction.response.send_message(f"'{self.entry.title}' is already at the bottom of the queue.", ephemeral=True)
 
 async def send_now_playing(interaction, entry, paused=False):
     embed = discord.Embed(title="Now Playing", description=entry.title, url=entry.video_url)
@@ -723,7 +739,8 @@ class MusicCommands(commands.Cog):
         **/stop** - Stops playback and disconnects the bot from the voice channel.
         **/previous** - Plays the last entry that was being played.
         **/restart** - Restarts the currently playing track from the beginning.
-        
+        **/move_queue [current_index] [new_index]** - Moves an entry from the current index to the new index in the queue.
+
         **Always taking suggestions for the live service of Radio-Bot**
 
         Type a command to execute it. For example: `/play https://youtube.com/watch?v=example`
@@ -791,7 +808,7 @@ class MusicCommands(commands.Cog):
         if not queue:
             await interaction.response.send_message("The queue is currently empty.")
             return
-        first_entry_before_shuffle  = queue_manager.currently_playing
+        first_entry_before_shuffle = queue_manager.currently_playing
 
         queue_manager.has_been_shuffled = True
         random.shuffle(queue)
@@ -801,7 +818,7 @@ class MusicCommands(commands.Cog):
         titles = [entry.title for entry in queue]
         response = "Queue after shuffle:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
         await interaction.response.send_message(response)
-        await self.send_now_playing(interaction, first_entry_before_shuffle)
+        await send_now_playing(interaction, first_entry_before_shuffle)
 
     @app_commands.command(name='play_queue', description='Play the current queue.')
     async def play_queue(self, interaction: discord.Interaction):
@@ -838,16 +855,33 @@ class MusicCommands(commands.Cog):
 
             for chunk in chunks:
                 await interaction.response.send_message(chunk)
+            await send_now_playing(interaction, queue_manager.currently_playing)
 
     @app_commands.command(name='remove_queue', description='Remove a track from the queue by index.')
     async def remove_queue(self, interaction: discord.Interaction, index: int):
         queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
-        if 0 <= index < len(queue):
-            removed_entry = queue.pop(index)
+        adjusted_index = index - 1
+
+        if 0 <= adjusted_index < len(queue):
+            removed_entry = queue.pop(adjusted_index)
             queue_manager.save_queues()
             await interaction.response.send_message(f"Removed '{removed_entry.title}' from the queue.")
         else:
             await interaction.response.send_message("Invalid index. Please provide a valid index of the song to remove.")
+
+    @app_commands.command(name='move_queue', description='Move a track to a new position in the queue.')
+    async def move_queue(self, interaction: discord.Interaction, current_index: int, new_index: int):
+        queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
+        adjusted_current_index = current_index - 1
+        adjusted_new_index = new_index - 1
+
+        if 0 <= adjusted_current_index < len(queue) and 0 <= adjusted_new_index < len(queue):
+            entry = queue.pop(adjusted_current_index)
+            queue.insert(adjusted_new_index, entry)
+            queue_manager.save_queues()
+            await interaction.response.send_message(f"Moved '{entry.title}' to position {new_index}.")
+        else:
+            await interaction.response.send_message("Invalid index. Please provide valid indices for the current and new positions.")
 
     @app_commands.command(name='skip', description='Skip the current track.')
     async def skip(self, interaction: discord.Interaction):
