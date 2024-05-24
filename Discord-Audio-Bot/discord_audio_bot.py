@@ -726,15 +726,15 @@ class MusicCommands(commands.Cog):
         self.bot = bot
         logging.debug("Initializing MusicCommands Cog")
         
-    @app_commands.command(name='loop', description='Toggle looping of the current track.')
-    async def loop(self, interaction: discord.Interaction):
-        logging.debug("Loop command executed")
-        if queue_manager.currently_playing:
-            queue_manager.loop = not queue_manager.loop
-            await interaction.response.send_message(f"Looping {'enabled' if queue_manager.loop else 'disabled'}.")
-            logging.info(f"Looping {'enabled' if queue_manager.loop else 'disabled'} for {queue_manager.currently_playing.title}")
-        else:
-            await interaction.response.send_message("No track is currently playing.")
+        # @app_commands.command(name='loop', description='Toggle looping of the current track.')
+        # async def loop(self, interaction: discord.Interaction):
+        #     logging.debug("Loop command executed")
+        #     if queue_manager.currently_playing:
+        #         queue_manager.loop = not queue_manager.loop
+        #         await interaction.response.send_message(f"Looping {'enabled' if queue_manager.loop else 'disabled'}.")
+        #         logging.info(f"Looping {'enabled' if queue_manager.loop else 'disabled'} for {queue_manager.currently_playing.title}")
+        #     else:
+        #         await interaction.response.send_message("No track is currently playing.")
 
     @app_commands.command(name='play', description='Play a URL or attached MP3 file.')
     async def play(self, interaction: discord.Interaction, url: str = None, mp3_file: Optional[Attachment] = None):
