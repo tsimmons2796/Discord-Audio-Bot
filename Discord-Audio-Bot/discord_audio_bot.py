@@ -593,8 +593,16 @@ class ButtonView(discord.ui.View):
 
         titles = [entry.title for entry in queue]
         response = "Queue after shuffle:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
-        await interaction.response.send_message(response)
-        await send_now_playing(interaction, first_entry_before_shuffle)
+
+        max_length = 2000  # Discord message character limit
+        chunks = [response[i:i+max_length] for i in range(0, len(response), max_length)]
+
+        for chunk in chunks:
+            await interaction.channel.send(chunk)
+        
+        if first_entry_before_shuffle or any(vc.is_paused() for vc in interaction.guild.voice_clients):
+            await send_now_playing(interaction, first_entry_before_shuffle)
+
 
     async def list_queue_button_callback(self, interaction: discord.Interaction):
         logging.debug("List queue button callback triggered")
@@ -605,12 +613,15 @@ class ButtonView(discord.ui.View):
             titles = [entry.title for entry in queue]
             response = "Current Queue:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
 
-            max_length = 2000
+            max_length = 2000  # Discord message character limit
             chunks = [response[i:i+max_length] for i in range(0, len(response), max_length)]
 
             for chunk in chunks:
-                await interaction.response.send_message(chunk)
-            await send_now_playing(interaction, queue_manager.currently_playing)
+                await interaction.channel.send(chunk)
+            
+            if queue_manager.currently_playing or any(vc.is_paused() for vc in interaction.guild.voice_clients):
+                await send_now_playing(interaction, queue_manager.currently_playing)
+
 
     async def remove_button_callback(self, interaction: discord.Interaction):
         logging.debug("Remove button callback triggered")
@@ -725,16 +736,16 @@ class MusicCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         logging.debug("Initializing MusicCommands Cog")
-        
-        # @app_commands.command(name='loop', description='Toggle looping of the current track.')
-        # async def loop(self, interaction: discord.Interaction):
-        #     logging.debug("Loop command executed")
-        #     if queue_manager.currently_playing:
-        #         queue_manager.loop = not queue_manager.loop
-        #         await interaction.response.send_message(f"Looping {'enabled' if queue_manager.loop else 'disabled'}.")
-        #         logging.info(f"Looping {'enabled' if queue_manager.loop else 'disabled'} for {queue_manager.currently_playing.title}")
-        #     else:
-        #         await interaction.response.send_message("No track is currently playing.")
+
+      # Do not comment out or get rid of this block  
+    # @app_commands.command(name='loop', description='Toggle looping of the current track.')
+    # async def loop(self, interaction: discord.Interaction):
+    #     if queue_manager.currently_playing:
+    #         queue_manager.loop = not queue_manager.loop
+    #         await interaction.response.send_message(f"Looping {'enabled' if queue_manager.loop else 'disabled'}.")
+    #         logging.info(f"Looping {'enabled' if queue_manager.loop else 'disabled'} for {queue_manager.currently_playing.title}")
+    #     else:
+    #         await interaction.response.send_message("No track is currently playing.")
 
     @app_commands.command(name='play', description='Play a URL or attached MP3 file.')
     async def play(self, interaction: discord.Interaction, url: str = None, mp3_file: Optional[Attachment] = None):
@@ -1006,13 +1017,22 @@ class MusicCommands(commands.Cog):
 
         queue_manager.has_been_shuffled = True
         random.shuffle(queue)
+        for entry in queue:
+            entry.has_been_arranged = False
         queue_manager.queues[today_str] = queue
         queue_manager.save_queues()
 
         titles = [entry.title for entry in queue]
         response = "Queue after shuffle:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
-        await interaction.response.send_message(response)
-        await send_now_playing(interaction, first_entry_before_shuffle)
+
+        max_length = 2000  # Discord message character limit
+        chunks = [response[i:i+max_length] for i in range(0, len(response), max_length)]
+
+        for chunk in chunks:
+            await interaction.channel.send(chunk)
+        
+        if first_entry_before_shuffle or any(vc.is_paused() for vc in interaction.guild.voice_clients):
+            await send_now_playing(interaction, first_entry_before_shuffle)
 
     @app_commands.command(name='play_queue', description='Play the current queue.')
     async def play_queue(self, interaction: discord.Interaction):
@@ -1046,12 +1066,14 @@ class MusicCommands(commands.Cog):
             titles = [entry.title for entry in queue]
             response = "Current Queue:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
 
-            max_length = 2000
+            max_length = 2000  # Discord message character limit
             chunks = [response[i:i+max_length] for i in range(0, len(response), max_length)]
 
             for chunk in chunks:
-                await interaction.response.send_message(chunk)
-            await send_now_playing(interaction, queue_manager.currently_playing)
+                await interaction.channel.send(chunk)
+            
+            if queue_manager.currently_playing or any(vc.is_paused() for vc in interaction.guild.voice_clients):
+                await send_now_playing(interaction, queue_manager.currently_playing)
 
     @app_commands.command(name='remove_queue', description='Remove a track from the queue by index.')
     async def remove_queue(self, interaction: discord.Interaction, index: int):
@@ -1142,7 +1164,7 @@ class MusicCommands(commands.Cog):
             await play_audio(interaction, current_entry)
 
     @commands.command(name='mp3_list')
-    async def play(self, ctx, url: str = None):
+    async def mp3_list(self, ctx, url: str = None):
         voice_client = discord.utils.get(ctx.bot.voice_clients, guild=ctx.guild)
         if not voice_client and ctx.author.voice:
             voice_client = await ctx.author.voice.channel.connect()
