@@ -868,10 +868,6 @@ class MusicCommands(commands.Cog):
         **/stop**
         - Stops playback and disconnects the bot from the voice channel.
 
-        **/previous**
-        - Plays the last entry that was being played.
-        - Useful for returning to the previously played track.
-
         **/restart**
         - Restarts the currently playing track from the beginning.
 
@@ -907,12 +903,14 @@ class MusicCommands(commands.Cog):
         - Removes the current track from the queue.
         - If the removed track is currently playing, playback stops.
 
-        **⏮️ Previous**
+        **⏮️ /previous**
         - Plays the last entry that was being played.
+        - Useful for returning to the previously played track.
 
         **🔁 Loop**
         - Toggles looping of the current track.
         - If enabled, the current track will repeat after it finishes playing.
+        - Continues looping the current track until loop button is clicked again.
 
         **⬆️ Move Up**
         - Moves the current track up one position in the queue.
