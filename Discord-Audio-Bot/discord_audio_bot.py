@@ -345,33 +345,6 @@ async def process_single_video_or_mp3(url, interaction):
             await interaction.response.send_message("Error retrieving video data.")
             return None
 
-async def handle_playlist(interaction, entries):
-    logging.debug("Handling playlist")
-    for index, video in enumerate(entries, start=1):
-        entry = QueueEntry(
-            video_url=video.get('webpage_url', ''),
-            best_audio_url=next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), ''),
-            title=video.get('title', 'Unknown title'),
-            is_playlist=True,
-            thumbnail=video.get('thumbnail', ''),
-            playlist_index=index
-        )
-        queue_manager.add_to_queue(entry)
-        if index == 1:
-            await play_audio(interaction, entry)
-
-async def handle_single_video(interaction, info):
-    logging.debug(f"Handling single video: {info['title']}")
-    entry = QueueEntry(
-        video_url=info.get('webpage_url', ''),
-        best_audio_url=next((f['url'] for f in info['formats'] if f.get('acodec') != 'none'), ''),
-        title=info.get('title', 'Unknown title'),
-        is_playlist=False,
-        thumbnail=info.get('thumbnail', '')
-    )
-    queue_manager.add_to_queue(entry)
-    await play_audio(interaction, entry)
-
 class AudioBot(commands.Bot):
     def __init__(self, command_prefix, intents):
         logging.debug("Initializing AudioBot")
@@ -747,6 +720,23 @@ class MusicCommands(commands.Cog):
     #     else:
     #         await interaction.response.send_message("No track is currently playing.")
 
+    @app_commands.command(name='play_next', description='Move a specified track to the second position in the queue.')
+    async def play_next(self, interaction: discord.Interaction, title: str):
+        logging.debug(f"Play next command executed for title: {title}")
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        queue = queue_manager.get_queue(today_str)
+
+        entry_index = next((i for i, entry in enumerate(queue) if entry.title == title), None)
+        if entry_index is None:
+            await interaction.response.send_message(f"No track found with title '{title}'.")
+            return
+
+        entry = queue.pop(entry_index)
+        queue.insert(1, entry)
+        queue_manager.save_queues()
+        
+        await interaction.response.send_message(f"Moved '{title}' to the second position in the queue.")
+
     @app_commands.command(name='play', description='Play a URL or attached MP3 file.')
     async def play(self, interaction: discord.Interaction, url: str = None, mp3_file: Optional[Attachment] = None):
         voice_client = interaction.guild.voice_client
@@ -886,6 +876,10 @@ class MusicCommands(commands.Cog):
         - Removes a track from the queue by its index.
         - The index is the position in the queue, starting from 1.
 
+        **/play_next [title]**
+        - Moves a specified track to the second position in the queue.
+        - If a title is provided and found in the queue, it will be moved to the second position.
+
         **Buttons:**
 
         **⏸️ Pause**
@@ -944,10 +938,42 @@ class MusicCommands(commands.Cog):
         **Always taking suggestions for the live service of Radio-Bot**
         """
         max_length = 2000
-        chunks = [help_text[i:i+max_length] for i in range(0, len(help_text), max_length)]
+        pattern = re.compile(r"(\*\*.+?\*\*[\s\S]*?(?=\n\s*\*\*|$))")
 
+        matches = pattern.findall(help_text)
+        chunks = []
+        current_chunk = ""
+
+        for match in matches:
+            if len(current_chunk) + len(match) + 1 > max_length:
+                chunks.append(current_chunk)
+                current_chunk = ""
+            current_chunk += match + "\n"
+        
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        # Ensure "Buttons:" title is within the same message as the first button title and its description
+        for i, chunk in enumerate(chunks):
+            if "**Buttons:**" in chunk:
+                button_section_start_index = chunk.index("**Buttons:**")
+                before_buttons = chunk[:button_section_start_index]
+                buttons_and_after = chunk[button_section_start_index:]
+                if len(before_buttons) + len(buttons_and_after.split("\n", 2)[0]) > max_length:
+                    chunks[i] = before_buttons
+                    chunks.insert(i + 1, buttons_and_after)
+                else:
+                    chunks[i] = before_buttons + buttons_and_after
+                break
+
+        # Send the chunks ensuring the interaction is not responded to multiple times incorrectly
+        first_message_sent = False
         for chunk in chunks:
-            await interaction.response.send_message(chunk)
+            if not first_message_sent:
+                await interaction.response.send_message(chunk)
+                first_message_sent = True
+            else:
+                await interaction.followup.send(chunk)
 
     @app_commands.command(name='play_video', description='Play a video from the queue by title.')
     async def play_video(self, interaction: discord.Interaction, title: str):
