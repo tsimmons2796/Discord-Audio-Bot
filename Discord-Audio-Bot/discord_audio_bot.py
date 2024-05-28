@@ -5,7 +5,7 @@ import logging
 import os
 import discord
 from discord.ext import commands
-from discord import app_commands
+from discord import app_commands, Attachment
 from dotenv import load_dotenv
 import yt_dlp
 import asyncio
@@ -14,7 +14,6 @@ import random
 import aiohttp
 import re
 from typing import List, Dict, Optional
-from discord import Attachment
 
 logging.basicConfig(level=logging.DEBUG, filename='queue_log.log', format='%(asctime)s:%(levelname)s:%(message)s')
 
