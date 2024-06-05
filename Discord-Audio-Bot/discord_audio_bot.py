@@ -14,12 +14,12 @@ import random
 import aiohttp
 import re
 from typing import List, Dict, Optional
-from youtubesearchpython import VideosSearch 
+from youtubesearchpython import VideosSearch
 
 logging.basicConfig(level=logging.DEBUG, filename='queue_log.log', format='%(asctime)s:%(levelname)s:%(message)s')
 
 class QueueEntry:
-    def __init__(self, video_url: str, best_audio_url: str, title: str, is_playlist: bool, thumbnail: str = '', playlist_index: Optional[int] = None, duration: int = 0, is_favorited: bool = False, favorited_by: Optional[List[Dict[str, str]]] = None, has_been_arranged: bool = False, timestamp: Optional[str] = None, paused_duration: Optional[float] = 0.0):
+    def __init__(self, video_url: str, best_audio_url: str, title: str, is_playlist: bool, thumbnail: str = '', playlist_index: Optional[int] = None, duration: int = 0, is_favorited: bool = False, favorited_by: Optional[List[Dict[str, str]]] = None, has_been_arranged: bool = False, timestamp: Optional[str] = None, paused_duration: Optional[float] = 0.0, guild: Optional[discord.Guild] = None):
         logging.debug(f"Creating QueueEntry: {title}, URL: {video_url}")
         self.video_url = video_url
         self.best_audio_url = best_audio_url
@@ -35,6 +35,7 @@ class QueueEntry:
         self.pause_start_time = None
         self.start_time = datetime.now()
         self.paused_duration = timedelta(seconds=paused_duration) if isinstance(paused_duration, (int, float)) else timedelta(seconds=0.0)
+        self.guild = guild
 
     def to_dict(self):
         return {
@@ -68,29 +69,11 @@ class QueueEntry:
                     self.timestamp = datetime.now().isoformat()  # Update the timestamp after refreshing
                     logging.info(f"URL refreshed for {self.title}. New URL: {self.best_audio_url}, Duration: {self.duration}")
 
-
-    async def refresh_url(self):
-        logging.debug(f"Refreshing URL for: {self.title}")
-        if 'youtube.com' in self.video_url or 'youtu.be' in self.video_url:
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'noplaylist': True,
-                'ignoreerrors': True
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.get_running_loop().run_in_executor(None, lambda: ydl.extract_info(self.video_url, download=False))
-                if info:
-                    self.best_audio_url = next((f['url'] for f in info['formats'] if f.get('acodec') != 'none'), self.video_url)
-                    self.duration = info.get('duration', 0)  # Update duration
-                    self.timestamp = datetime.now().isoformat()  # Update the timestamp after refreshing
-                    logging.info(f"URL refreshed for {self.title}. New URL: {self.best_audio_url}, Duration: {self.duration}")
-
 class BotQueue:
     def __init__(self):
         logging.debug("Initializing BotQueue")
         self.currently_playing = None
         self.queues = self.load_queues()
-        self.ensure_today_queue_exists()
         self.last_played_audio = self.load_last_played_audio()
         self.is_restarting = False
         self.has_been_shuffled = False
@@ -102,19 +85,19 @@ class BotQueue:
         try:
             with open('queues.json', 'r') as file:
                 queues_data = json.load(file)
-            return {date: [QueueEntry(**entry) for entry in entries] for date, entries in queues_data.items()}
+            return {server_id: [QueueEntry(**entry) for entry in entries] for server_id, entries in queues_data.items()}
         except (json.JSONDecodeError, FileNotFoundError) as e:
             logging.error(f"Failed to load queues: {e}")
             return {}
 
-    def load_last_played_audio(self) -> Optional[str]:
+    def load_last_played_audio(self) -> Dict[str, Optional[str]]:
         logging.debug("Loading last played audio from file")
         try:
             with open('last_played_audio.json', 'r') as file:
-                return json.load(file).get('last_played_audio')
+                return json.load(file)
         except (FileNotFoundError, json.JSONDecodeError) as e:
             logging.error(f"Failed to load last played audio: {e}")
-            return None
+            return {}
 
     def save_queues(self):
         logging.debug("Saving queues to file")
@@ -122,31 +105,26 @@ class BotQueue:
             with open('queues.json', 'w') as file:
                 json.dump({k: [entry.to_dict() for entry in v] for k, v in self.queues.items()}, file, indent=4)
             with open('last_played_audio.json', 'w') as file:
-                if self.last_played_audio is None:
-                    json.dump({'last_played_audio': None}, file, indent=4)
-                else:
-                    json.dump({'last_played_audio': self.last_played_audio}, file, indent=4)
+                json.dump(self.last_played_audio, file, indent=4)
         except Exception as e:
             logging.error(f"Failed to save queues or last played audio: {e}")
 
-    def get_queue(self, date_str: str) -> List[QueueEntry]:
-        logging.debug(f"Getting queue for date: {date_str}")
-        return self.queues.get(date_str, [])
+    def get_queue(self, server_id: str) -> List[QueueEntry]:
+        logging.debug(f"Getting queue for server: {server_id}")
+        return self.queues.get(server_id, [])
 
-    def add_to_queue(self, entry: QueueEntry):
-        date_str = datetime.now().strftime('%Y-%m-%d')
-        if date_str not in self.queues:
-            self.queues[date_str] = []
-        self.queues[date_str].append(entry)
+    def add_to_queue(self, server_id: str, entry: QueueEntry):
+        if server_id not in self.queues:
+            self.queues[server_id] = []
+        self.queues[server_id].append(entry)
         self.save_queues()
-        logging.info(f"Added {entry.title} to queue on {date_str}")
+        logging.info(f"Added {entry.title} to queue for server {server_id}")
 
-    def ensure_today_queue_exists(self):
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        if today_str not in self.queues:
-            self.queues[today_str] = []
+    def ensure_queue_exists(self, server_id: str):
+        if server_id not in self.queues:
+            self.queues[server_id] = []
             self.save_queues()
-            logging.info(f"Created a new queue for today: {today_str}")
+            logging.info(f"Ensured queue exists for server: {server_id}")
 
 queue_manager = BotQueue()
 executor = ThreadPoolExecutor(max_workers=1)
@@ -160,17 +138,23 @@ async def fetch_info(url, index: int = None):
         'ignoreerrors': True
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = await asyncio.get_running_loop().run_in_executor(executor, lambda: ydl.extract_info(url, download=False))
-        if 'entries' in info:
-            for entry in info['entries']:
-                entry['duration'] = entry.get('duration', 0)
-                entry['thumbnail'] = entry.get('thumbnail', '')
-        else:
-            info['duration'] = info.get('duration', 0)
-            info['thumbnail'] = info.get('thumbnail', '')
-        logging.info(f"Fetched info: {info}")
-        return info
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await asyncio.get_running_loop().run_in_executor(executor, lambda: ydl.extract_info(url, download=False))
+            if 'entries' in info:
+                for entry in info['entries']:
+                    entry['duration'] = entry.get('duration', 0)
+                    entry['thumbnail'] = entry.get('thumbnail', '')
+                    entry['best_audio_url'] = next((f['url'] for f in entry['formats'] if f.get('acodec') != 'none'), entry.get('url'))
+            else:
+                info['duration'] = info.get('duration', 0)
+                info['thumbnail'] = info.get('thumbnail', '')
+                info['best_audio_url'] = next((f['url'] for f in info['formats'] if f.get('acodec') != 'none'), info.get('url'))
+            logging.info(f"Fetched info: {info}")
+            return info
+    except yt_dlp.utils.ExtractorError as e:
+        logging.warning(f"Skipping unavailable video: {str(e)}")
+        return None
 
 async def fetch_playlist_length(url):
     logging.debug(f"Fetching playlist length for URL: {url}")
@@ -201,9 +185,12 @@ async def download_file(url: str, dest_folder: str) -> str:
                 return None
 
 async def play_audio(ctx_or_interaction, entry):
-    logging.debug(f"Preparing to play audio for: {entry.title}")
     try:
+        server_id = str(ctx_or_interaction.guild.id)
+        queue_manager.ensure_queue_exists(server_id)
         entry_timestamp = datetime.fromisoformat(entry.timestamp)
+        entry.guild = ctx_or_interaction.guild  # Ensure guild is set
+
         if datetime.now() - entry_timestamp > timedelta(hours=3):
             await entry.refresh_url()
 
@@ -212,7 +199,8 @@ async def play_audio(ctx_or_interaction, entry):
 
         entry.start_time = datetime.now()  # Reset start time for new entry
         entry.paused_duration = timedelta(0)  # Reset paused duration for new entry
-        queue_manager.currently_playing = entry
+        entry.has_been_arranged = False  # Reset the has_been_arranged flag
+        queue_manager.currently_playing = entry  # Set the currently playing entry
         queue_manager.save_queues()
 
         logging.info(f"Starting playback for: {entry.title} (URL: {entry.best_audio_url})")
@@ -226,9 +214,11 @@ async def play_audio(ctx_or_interaction, entry):
             else:
                 logging.info(f"Finished playing {entry.title} at {datetime.now()}")
 
-                if not queue_manager.is_restarting and not queue_manager.has_been_shuffled and not entry.has_been_arranged:
-                    date_str = datetime.now().strftime('%Y-%m-%d')
-                    queue = queue_manager.get_queue(date_str)
+                # Reset the has_been_arranged flag
+                entry.has_been_arranged = False
+
+                if not queue_manager.is_restarting and not queue_manager.has_been_shuffled and not queue_manager.loop:
+                    queue = queue_manager.get_queue(server_id)
                     if entry in queue:
                         queue.remove(entry)
                         queue.append(entry)
@@ -241,7 +231,7 @@ async def play_audio(ctx_or_interaction, entry):
                     asyncio.run_coroutine_threadsafe(play_audio(ctx_or_interaction, entry), bot_client.loop).result()
                 else:
                     if not queue_manager.is_restarting:
-                        queue_manager.last_played_audio = entry.title
+                        queue_manager.last_played_audio[server_id] = entry.title
                     queue_manager.save_queues()
                     bot_client = ctx_or_interaction.client if hasattr(ctx_or_interaction, 'client') else ctx_or_interaction.bot
                     asyncio.run_coroutine_threadsafe(play_next(ctx_or_interaction), bot_client.loop).result()
@@ -282,6 +272,14 @@ async def play_audio(ctx_or_interaction, entry):
         if not ctx_or_interaction.response.is_done():
             await ctx_or_interaction.followup.send(f"An error occurred: {e}")
 
+        # Update all "Now Playing" messages
+        for message_id in ctx_or_interaction.client.now_playing_messages:
+            try:
+                message = await ctx_or_interaction.channel.fetch_message(message_id)
+                view = ButtonView(ctx_or_interaction.client, entry)
+                await message.edit(view=view)
+            except Exception as e:
+                logging.error(f"Error updating view for message {message_id}: {e}")
 
 async def update_entry_duration(entry):
     ydl_opts = {
@@ -304,18 +302,46 @@ async def send_now_playing(interaction, entry, paused=False):
     embed.add_field(name="URL", value=entry.video_url, inline=False)
     embed.add_field(name="Favorited by", value=', '.join([user['name'] for user in entry.favorited_by]), inline=False)
 
-    view = ButtonView(interaction.client, entry, paused=paused)
+    view = ButtonView(interaction.client, entry, paused=paused, current_user=interaction.user)
     message = await interaction.channel.send(embed=embed, view=view)
-    if not paused:
+
+    if not paused and not queue_manager.currently_playing:
         entry.start_time = datetime.now()
     await update_progress_bar(interaction, message, entry)
+
+    # Store message ID and custom IDs to persist button views
+    interaction.client.message_views[message.id] = view
+    interaction.client.add_now_playing_message(message.id)
+
+    logging.debug(f"Now playing message sent with ID: {message.id}")
 
 async def update_progress_bar(interaction, message, entry):
     logging.debug(f"Updating progress bar for: {entry.title}")
     duration = entry.duration if hasattr(entry, 'duration') else 300
     while True:
-        if not interaction.guild.voice_client or not interaction.guild.voice_client.is_playing():
+        # Check if the currently playing entry is still the same as this entry
+        if queue_manager.currently_playing != entry:
+            logging.info(f"Stopping progress update for {entry.title} as it is no longer the currently playing entry.")
             break
+
+        if not interaction.guild.voice_client or not interaction.guild.voice_client.is_playing():
+            # Playback has stopped, update the progress one last time and break the loop
+            elapsed = (datetime.now() - entry.start_time - entry.paused_duration).total_seconds()
+            if elapsed > duration:
+                elapsed = duration
+            progress = elapsed / duration
+            progress_bar = "[" + "=" * int(progress * 20) + " " * (20 - int(progress * 20)) + "]"
+            elapsed_str = str(timedelta(seconds=int(elapsed)))
+            duration_str = str(timedelta(seconds=duration))
+            
+            embed = message.embeds[0]
+            embed.set_field_at(2, name="Progress", value=f"{progress_bar} {elapsed_str} / {duration_str}", inline=False)
+            embed.set_field_at(3, name="Favorited by", value=', '.join([user['name'] for user in entry.favorited_by]), inline=False)
+            
+            view = ButtonView(interaction.client, entry, paused=False, current_user=interaction.user)
+            await message.edit(embed=embed, view=view)
+            break
+
         elapsed = (datetime.now() - entry.start_time - entry.paused_duration).total_seconds()
         if elapsed >= duration:
             break
@@ -327,13 +353,17 @@ async def update_progress_bar(interaction, message, entry):
         
         embed = message.embeds[0]
         embed.set_field_at(0, name="Progress", value=f"{progress_bar} {elapsed_str} / {duration_str}", inline=False)
-        await message.edit(embed=embed)
+        embed.set_field_at(1, name="Favorited by", value=', '.join([user['name'] for user in entry.favorited_by]), inline=False)
+        
+        view = ButtonView(interaction.client, entry, paused=False, current_user=interaction.user)
+        await message.edit(embed=embed, view=view)
         await asyncio.sleep(1)
 
 
 async def play_next(interaction):
     logging.debug("Playing next track in the queue")
-    queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
+    server_id = str(interaction.guild.id)
+    queue = queue_manager.get_queue(server_id)
     if queue and queue_manager.currently_playing:
         current_entry = queue_manager.currently_playing
         if current_entry in queue and not queue_manager.is_restarting:
@@ -350,6 +380,7 @@ async def play_next(interaction):
 
 async def process_play_command(interaction, url):
     logging.debug(f"Processing play command for URL: {url}")
+    server_id = str(interaction.guild.id)
     first_video_info = await fetch_info(url, index=1)
     if not first_video_info or 'entries' not in first_video_info or not first_video_info['entries']:
         await interaction.response.send_message("Could not retrieve the first video of the playlist.")
@@ -359,14 +390,14 @@ async def process_play_command(interaction, url):
     if first_video:
         first_entry = QueueEntry(
             video_url=first_video.get('webpage_url', ''),
-            best_audio_url=next((f['url'] for f in first_video['formats'] if f.get('acodec') != 'none'), ''),
+            best_audio_url=first_video.get('best_audio_url', ''),
             title=first_video.get('title', 'Unknown title'),
             is_playlist=True,
             thumbnail=first_video.get('thumbnail', ''),
             playlist_index=1,
             duration=first_video.get('duration', 0)
         )
-        queue_manager.add_to_queue(first_entry)
+        queue_manager.add_to_queue(server_id, first_entry)
         await interaction.response.send_message(f"Added to queue: {first_entry.title}")
         await play_audio(interaction, first_entry)
     else:
@@ -382,23 +413,26 @@ async def process_play_command(interaction, url):
                     video = info['entries'][0]
                     entry = QueueEntry(
                         video_url=video.get('webpage_url', ''),
-                        best_audio_url=next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), ''),
+                        best_audio_url=video.get('best_audio_url', ''),
                         title=video.get('title', 'Unknown title'),
                         is_playlist=True,
                         thumbnail=video.get('thumbnail', ''),
                         playlist_index=index,
                         duration=video.get('duration', 0)
                     )
-                    queue_manager.add_to_queue(entry)
+                    queue_manager.add_to_queue(server_id, entry)
                     await interaction.channel.send(f"Added to queue: {entry.title}")
+                else:
+                    await interaction.channel.send(f"Skipping unavailable video at index {index}")
             except yt_dlp.utils.ExtractorError as e:
                 logging.warning(f"Skipping unavailable video at index {index}: {str(e)}")
                 await interaction.channel.send(f"Skipping unavailable video at index {index}")
 
-    queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
+    queue = queue_manager.get_queue(server_id)
     titles = [entry.title for entry in queue]
     response = "Current Queue:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
     await interaction.response.send_message(response)
+
 
 async def process_single_video_or_mp3(url, interaction):
     logging.debug(f"Processing single video or MP3 for URL: {url}")
@@ -409,7 +443,7 @@ async def process_single_video_or_mp3(url, interaction):
         if video_info:
             return QueueEntry(
                 video_url=video_info.get('webpage_url', url),
-                best_audio_url=next((f['url'] for f in video_info['formats'] if f.get('acodec') != 'none'), url),
+                best_audio_url=video_info.get('best_audio_url', url),
                 title=video_info.get('title', 'Unknown title'),
                 is_playlist=False,
                 thumbnail=video_info.get('thumbnail', ''),
@@ -423,6 +457,8 @@ class AudioBot(commands.Bot):
     def __init__(self, command_prefix, intents):
         logging.debug("Initializing AudioBot")
         super().__init__(command_prefix, intents=intents)
+        self.message_views = {}
+        self.now_playing_messages = []
 
     async def setup_hook(self):
         logging.debug("Setting up hook for AudioBot")
@@ -434,44 +470,47 @@ class AudioBot(commands.Bot):
         logging.info(f'{self.user} is now connected and ready.')
         print(f'{self.user} is now connected and ready.')
 
+    async def on_message(self, message):
+        view = self.message_views.get(message.id)
+        if view:
+            await message.edit(view=view)
+
+    def add_now_playing_message(self, message_id):
+        self.now_playing_messages.append(message_id)
+
+    def clear_now_playing_messages(self):
+        self.now_playing_messages.clear()
+
+
 class ButtonView(discord.ui.View):
-    def __init__(self, bot, entry: QueueEntry, paused: bool = False):
+    def __init__(self, bot, entry: QueueEntry, paused: bool = False, current_user: Optional[discord.User] = None):
         logging.debug(f"Initializing ButtonView for: {entry.title}")
         super().__init__(timeout=None)
         self.bot = bot
         self.paused = paused
         self.entry = entry
+        self.current_user = current_user
 
-        self.pause_button_id = f"pause-{uuid.uuid4()}"
-        self.resume_button_id = f"resume-{uuid.uuid4()}"
-        self.stop_button_id = f"stop-{uuid.uuid4()}"
-        self.skip_button_id = f"skip-{uuid.uuid4()}"
-        self.restart_button_id = f"restart-{uuid.uuid4()}"
-        self.shuffle_button_id = f"shuffle-{uuid.uuid4()}"
-        self.list_queue_button_id = f"list_queue-{uuid.uuid4()}"
-        self.remove_button_id = f"remove-{uuid.uuid4()}"
-        self.previous_button_id = f"previous-{uuid.uuid4()}"
-        self.favorite_button_id = f"favorite-{uuid.uuid4()}"
-        self.loop_button_id = f"loop-{uuid.uuid4()}"
-        self.move_up_button_id = f"move_up-{uuid.uuid4()}"
-        self.move_down_button_id = f"move_down-{uuid.uuid4()}"
-        self.move_to_top_button_id = f"move_to_top-{uuid.uuid4()}"
-        self.move_to_bottom_button_id = f"move_to_bottom-{uuid.uuid4()}"
+        self.pause_button = discord.ui.Button(label="⏸️ Pause", style=discord.ButtonStyle.primary, custom_id=f"pause-{uuid.uuid4()}")
+        self.resume_button = discord.ui.Button(label="▶️ Resume", style=discord.ButtonStyle.primary, custom_id=f"resume-{uuid.uuid4()}")
+        self.stop_button = discord.ui.Button(label="⏹️ Stop", style=discord.ButtonStyle.danger, custom_id=f"stop-{uuid.uuid4()}")
+        self.skip_button = discord.ui.Button(label="⏭️ Skip", style=discord.ButtonStyle.secondary, custom_id=f"skip-{uuid.uuid4()}")
+        self.restart_button = discord.ui.Button(label="🔄 Restart", style=discord.ButtonStyle.secondary, custom_id=f"restart-{uuid.uuid4()}")
+        self.shuffle_button = discord.ui.Button(label="🔀 Shuffle", style=discord.ButtonStyle.secondary, custom_id=f"shuffle-{uuid.uuid4()}")
+        self.list_queue_button = discord.ui.Button(label="📜 List Queue", style=discord.ButtonStyle.secondary, custom_id=f"list_queue-{uuid.uuid4()}")
+        self.remove_button = discord.ui.Button(label="❌ Remove", style=discord.ButtonStyle.danger, custom_id=f"remove-{uuid.uuid4()}")
+        self.previous_button = discord.ui.Button(label="⏮️ Previous", style=discord.ButtonStyle.secondary, custom_id=f"previous-{uuid.uuid4()}")
+        self.loop_button = discord.ui.Button(label="🔁 Loop", style=discord.ButtonStyle.secondary, custom_id=f"loop-{uuid.uuid4()}")
+        self.move_up_button = discord.ui.Button(label="⬆️ Move Up", style=discord.ButtonStyle.secondary, custom_id=f"move_up-{uuid.uuid4()}")
+        self.move_down_button = discord.ui.Button(label="⬇️ Move Down", style=discord.ButtonStyle.secondary, custom_id=f"move_down-{uuid.uuid4()}")
+        self.move_to_top_button = discord.ui.Button(label="⬆️⬆️ Move to Top", style=discord.ButtonStyle.secondary, custom_id=f"move_to_top-{uuid.uuid4()}")
+        self.move_to_bottom_button = discord.ui.Button(label="⬇️⬇️ Move to Bottom", style=discord.ButtonStyle.secondary, custom_id=f"move_to_bottom-{uuid.uuid4()}")
 
-        self.pause_button = discord.ui.Button(label="⏸️ Pause", style=discord.ButtonStyle.primary, custom_id=self.pause_button_id)
-        self.resume_button = discord.ui.Button(label="▶️ Resume", style=discord.ButtonStyle.primary, custom_id=self.resume_button_id)
-        self.stop_button = discord.ui.Button(label="⏹️ Stop", style=discord.ButtonStyle.danger, custom_id=self.stop_button_id)
-        self.skip_button = discord.ui.Button(label="⏭️ Skip", style=discord.ButtonStyle.secondary, custom_id=self.skip_button_id)
-        self.restart_button = discord.ui.Button(label="🔄 Restart", style=discord.ButtonStyle.secondary, custom_id=self.restart_button_id)
-        self.shuffle_button = discord.ui.Button(label="🔀 Shuffle", style=discord.ButtonStyle.secondary, custom_id=self.shuffle_button_id)
-        self.list_queue_button = discord.ui.Button(label="📜 List Queue", style=discord.ButtonStyle.secondary, custom_id=self.list_queue_button_id)
-        self.remove_button = discord.ui.Button(label="❌ Remove", style=discord.ButtonStyle.danger, custom_id=self.remove_button_id)
-        self.previous_button = discord.ui.Button(label="⏮️ Previous", style=discord.ButtonStyle.secondary, custom_id=self.previous_button_id)
-        self.loop_button = discord.ui.Button(label="🔁 Loop", style=discord.ButtonStyle.secondary, custom_id=self.loop_button_id)
-        self.move_up_button = discord.ui.Button(label="⬆️ Move Up", style=discord.ButtonStyle.secondary, custom_id=self.move_up_button_id)
-        self.move_down_button = discord.ui.Button(label="⬇️ Move Down", style=discord.ButtonStyle.secondary, custom_id=self.move_down_button_id)
-        self.move_to_top_button = discord.ui.Button(label="⬆️⬆️ Move to Top", style=discord.ButtonStyle.secondary, custom_id=self.move_to_top_button_id)
-        self.move_to_bottom_button = discord.ui.Button(label="⬇️⬇️ Move to Bottom", style=discord.ButtonStyle.secondary, custom_id=self.move_to_bottom_button_id)
+        self.favorite_button = discord.ui.Button(
+            label="⭐ Favorite" if not self.is_favorited_by_current_user() else "💛 Favorited",
+            style=discord.ButtonStyle.secondary if not self.is_favorited_by_current_user() else discord.ButtonStyle.primary,
+            custom_id=f"favorite-{uuid.uuid4()}"
+        )
 
         self.pause_button.callback = self.pause_button_callback
         self.resume_button.callback = self.resume_button_callback
@@ -487,19 +526,23 @@ class ButtonView(discord.ui.View):
         self.move_down_button.callback = self.move_down_button_callback
         self.move_to_top_button.callback = self.move_to_top_button_callback
         self.move_to_bottom_button.callback = self.move_to_bottom_button_callback
-
-        self.favorite_button = discord.ui.Button(
-            label="⭐ Favorite" if not self.is_favorited_by_current_user() else "💛 Favorited",
-            style=discord.ButtonStyle.secondary if not self.is_favorited_by_current_user() else discord.ButtonStyle.primary,
-            custom_id=self.favorite_button_id
-        )
         self.favorite_button.callback = self.favorite_button_callback
 
         self.update_buttons()
 
+    async def refresh_all_views(self):
+        for message_id in self.bot.now_playing_messages:
+            try:
+                channel = self.bot.get_channel(self.entry.guild.id)  # Assuming the channel ID is the same as the guild ID for simplicity
+                message = await channel.fetch_message(message_id)
+                await message.edit(view=self)
+            except Exception as e:
+                logging.error(f"Error refreshing view for message {message_id}: {e}")
+
     def is_favorited_by_current_user(self):
-        current_user_id = self.bot.user.id
-        return current_user_id in [user['id'] for user in self.entry.favorited_by]
+        if self.current_user is None:
+            return False
+        return self.current_user.id in [user['id'] for user in self.entry.favorited_by]
 
     def update_buttons(self):
         self.clear_items()
@@ -517,16 +560,23 @@ class ButtonView(discord.ui.View):
         self.add_item(self.previous_button)
         self.add_item(self.favorite_button)
 
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
-        entry_index = queue.index(self.entry) if self.entry in queue else -1
+        logging.debug(f"Checking guild attribute for entry: {self.entry.title}")
 
-        if entry_index > 0:
-            self.add_item(self.move_up_button)
-            self.add_item(self.move_to_top_button)
-        if entry_index >= 0 and entry_index < len(queue) - 1:
-            self.add_item(self.move_down_button)
-            self.add_item(self.move_to_bottom_button)
+        if self.entry.guild:
+            server_id = str(self.entry.guild.id)
+            queue = queue_manager.get_queue(server_id)
+            entry_index = queue.index(self.entry) if self.entry in queue else -1
+
+            logging.debug(f"Entry index: {entry_index}, Queue length: {len(queue)}")
+
+            if entry_index > 0:
+                logging.debug(f"Adding move up and move to top buttons for {self.entry.title}")
+                self.add_item(self.move_up_button)
+                self.add_item(self.move_to_top_button)
+            if entry_index >= 0 and entry_index < len(queue) - 1:
+                logging.debug(f"Adding move down and move to bottom buttons for {self.entry.title}")
+                self.add_item(self.move_down_button)
+                self.add_item(self.move_to_bottom_button)
 
         self.loop_button.label = "🔁 Looped" if queue_manager.loop else "🔁 Loop"
         self.add_item(self.loop_button)
@@ -537,6 +587,7 @@ class ButtonView(discord.ui.View):
 
     async def loop_button_callback(self, interaction: discord.Interaction):
         logging.debug("Loop button callback triggered")
+        # server_id = str(interaction.guild.id)
         if queue_manager.currently_playing:
             queue_manager.loop = not queue_manager.loop
             self.loop_button.label = "🔁 Looped" if queue_manager.loop else "🔁 Loop"
@@ -564,6 +615,7 @@ class ButtonView(discord.ui.View):
 
         queue_manager.save_queues()
         await self.update_now_playing(interaction)
+        await self.refresh_all_views()  # Update all instances of "Now Playing"
         await interaction.followup.send(f"{'Added to' if self.entry.is_favorited else 'Removed from'} favorites.", ephemeral=True)
 
     async def update_now_playing(self, interaction: discord.Interaction):
@@ -572,16 +624,16 @@ class ButtonView(discord.ui.View):
         await interaction.message.edit(embed=embed, view=self)
 
     async def pause_button_callback(self, interaction: discord.Interaction):
-        logging.debug("Pause button callback triggered")
+        await interaction.response.defer(ephemeral=True)  # Defer the response
         if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
             interaction.guild.voice_client.pause()
             self.paused = True
             self.entry.pause_start_time = datetime.now()  # Record the time when paused
             await self.refresh_view(interaction)
-            await interaction.response.send_message('Playback paused.', ephemeral=True)
+            await interaction.followup.send('Playback paused.', ephemeral=True)
 
     async def resume_button_callback(self, interaction: discord.Interaction):
-        logging.debug("Resume button callback triggered")
+        await interaction.response.defer(ephemeral=True)  # Defer the response
         if interaction.guild.voice_client and interaction.guild.voice_client.is_paused():
             interaction.guild.voice_client.resume()
             self.paused = False
@@ -589,10 +641,10 @@ class ButtonView(discord.ui.View):
             self.entry.paused_duration += paused_duration  # Adjust total paused duration
             self.entry.start_time += paused_duration  # Adjust start time by the pause duration
             await self.refresh_view(interaction)
-            await interaction.response.send_message('Playback resumed.', ephemeral=True)
+            await interaction.followup.send('Playback resumed.', ephemeral=True)
 
     async def stop_button_callback(self, interaction: discord.Interaction):
-        logging.debug("Stop button callback triggered")
+        await interaction.response.defer()  # Defer the response
         if interaction.guild.voice_client:
             queue_manager.stop_is_triggered = True
             queue_manager.currently_playing = None
@@ -601,28 +653,27 @@ class ButtonView(discord.ui.View):
             except Exception as e:
                 logging.error(f"Error stopping the voice client: {e}")
             await interaction.guild.voice_client.disconnect()
-            await interaction.response.send_message('Playback stopped and disconnected.', ephemeral=True)
+            await interaction.followup.send('Playback stopped and disconnected.', ephemeral=True)
 
     async def skip_button_callback(self, interaction: discord.Interaction):
-        logging.debug("Skip button callback triggered")
-        date_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(date_str)
+        await interaction.response.defer()  # Defer the response
+        server_id = str(interaction.guild.id)
+        queue = queue_manager.get_queue(server_id)
         if not queue:
-            await interaction.response.send_message("Queue is empty.", ephemeral=True)
+            await interaction.followup.send("Queue is empty.", ephemeral=True)
             return
 
         if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
             interaction.guild.voice_client.stop()
             await asyncio.sleep(0.5)
-            await interaction.response.send_message("Skipped the current track.", ephemeral=True)
+            await interaction.followup.send("Skipped the current track.", ephemeral=True)
         else:
-            await interaction.response.send_message("Nothing is currently playing.", ephemeral=True)
+            await interaction.followup.send("Nothing is currently playing.", ephemeral=True)
 
     async def restart_button_callback(self, interaction: discord.Interaction):
-        logging.debug("Restart button callback triggered")
         await interaction.response.defer()  # Defer the response
         if not queue_manager.currently_playing:
-            await interaction.response.send_message("No track is currently playing.", ephemeral=True)
+            await interaction.followup.send("No track is currently playing.", ephemeral=True)
             return
 
         current_entry = queue_manager.currently_playing
@@ -633,12 +684,13 @@ class ButtonView(discord.ui.View):
             await asyncio.sleep(0.5)
             await play_audio(interaction, current_entry)
 
+
     async def shuffle_button_callback(self, interaction: discord.Interaction):
-        logging.debug("Shuffle button callback triggered")
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
+        await interaction.response.defer()  # Defer the response
+        server_id = str(interaction.guild.id)
+        queue = queue_manager.get_queue(server_id)
         if not queue:
-            await interaction.response.send_message("The queue is currently empty.")
+            await interaction.followup.send("The queue is currently empty.")
             return
         first_entry_before_shuffle = queue_manager.currently_playing
 
@@ -646,7 +698,7 @@ class ButtonView(discord.ui.View):
         random.shuffle(queue)
         for entry in queue:
             entry.has_been_arranged = False
-        queue_manager.queues[today_str] = queue
+        queue_manager.queues[server_id] = queue
         queue_manager.save_queues()
 
         titles = [entry.title for entry in queue]
@@ -661,11 +713,14 @@ class ButtonView(discord.ui.View):
         if first_entry_before_shuffle or any(vc.is_paused() for vc in interaction.guild.voice_clients):
             await send_now_playing(interaction, first_entry_before_shuffle)
 
+
     async def list_queue_button_callback(self, interaction: discord.Interaction):
-        logging.debug("List queue button callback triggered")
-        queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
+        await interaction.response.defer()  # Defer the response
+        server_id = str(interaction.guild.id)
+        queue_manager.ensure_queue_exists(server_id)
+        queue = queue_manager.get_queue(server_id)
         if not queue:
-            await interaction.response.send_message("The queue is currently empty.")
+            await interaction.followup.send("The queue is currently empty.")
         else:
             titles = [entry.title for entry in queue]
             response = "Current Queue:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
@@ -680,30 +735,29 @@ class ButtonView(discord.ui.View):
                 await send_now_playing(interaction, queue_manager.currently_playing)
 
     async def remove_button_callback(self, interaction: discord.Interaction):
-        logging.debug("Remove button callback triggered")
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
+        await interaction.response.defer()  # Defer the response
+        server_id = str(interaction.guild.id)
+        queue = queue_manager.get_queue(server_id)
         if self.entry in queue:
             queue.remove(self.entry)
             queue_manager.save_queues()
-            await interaction.response.send_message(f"Removed '{self.entry.title}' from the queue.", ephemeral=True)
+            await interaction.followup.send(f"Removed '{self.entry.title}' from the queue.", ephemeral=True)
 
         if interaction.guild.voice_client and interaction.guild.voice_client.is_playing() and queue_manager.currently_playing == self.entry:
             interaction.guild.voice_client.stop()
             queue_manager.currently_playing = None
-            await interaction.response.send_message(f"Stopped playback and removed '{self.entry.title}' from the queue.", ephemeral=True)
+            await interaction.followup.send(f"Stopped playback and removed '{self.entry.title}' from the queue.", ephemeral=True)
 
     async def previous_button_callback(self, interaction: discord.Interaction):
-        logging.debug("Previous button callback triggered")
-        await interaction.response.defer()
+        await interaction.response.defer()  # Defer the response
 
-        last_played = queue_manager.last_played_audio
+        server_id = str(interaction.guild.id)
+        last_played = queue_manager.last_played_audio.get(server_id)
         if not last_played:
             await interaction.followup.send("There was nothing played prior.", ephemeral=True)
             return
 
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
+        queue = queue_manager.get_queue(server_id)
         entry = next((e for e in queue if e.title == last_played), None)
 
         if not entry:
@@ -719,63 +773,66 @@ class ButtonView(discord.ui.View):
             await play_audio(interaction, entry)
             await self.refresh_view(interaction)
 
+
     async def move_up_button_callback(self, interaction: discord.Interaction):
-        logging.debug("Move up button callback triggered")
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
+        await interaction.response.defer()  # Defer the response
+        server_id = str(interaction.guild.id)
+        queue = queue_manager.get_queue(server_id)
         entry_index = queue.index(self.entry)
         
         if entry_index > 0:
             queue.insert(entry_index - 1, queue.pop(entry_index))
             self.entry.has_been_arranged = True
             queue_manager.save_queues()
-            await interaction.response.send_message(f"Moved '{self.entry.title}' up in the queue.", ephemeral=True)
+            await interaction.followup.send(f"Moved '{self.entry.title}' up in the queue.", ephemeral=True)
             await self.refresh_view(interaction)
         else:
-            await interaction.response.send_message(f"'{self.entry.title}' is already at the top of the queue.", ephemeral=True)
+            await interaction.followup.send(f"'{self.entry.title}' is already at the top of the queue.", ephemeral=True)
 
     async def move_down_button_callback(self, interaction: discord.Interaction):
-        logging.debug("Move down button callback triggered")
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
+        await interaction.response.defer()  # Defer the response
+        server_id = str(interaction.guild.id)
+        queue = queue_manager.get_queue(server_id)
         entry_index = queue.index(self.entry)
         
         if entry_index < len(queue) - 1:
             queue.insert(entry_index + 1, queue.pop(entry_index))
             self.entry.has_been_arranged = True
             queue_manager.save_queues()
-            await interaction.response.send_message(f"Moved '{self.entry.title}' down in the queue.", ephemeral=True)
+            await interaction.followup.send(f"Moved '{self.entry.title}' down in the queue.", ephemeral=True)
             await self.refresh_view(interaction)
         else:
-            await interaction.response.send_message(f"'{self.entry.title}' is already at the bottom of the queue.", ephemeral=True)
+            await interaction.followup.send(f"'{self.entry.title}' is already at the bottom of the queue.", ephemeral=True)
 
     async def move_to_top_button_callback(self, interaction: discord.Interaction):
-        logging.debug("Move to top button callback triggered")
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
+        await interaction.response.defer()  # Defer the response
+        server_id = str(interaction.guild.id)
+        queue = queue_manager.get_queue(server_id)
         entry_index = queue.index(self.entry)
         
         if entry_index > 0:
             queue.insert(0, queue.pop(entry_index))
             self.entry.has_been_arranged = True
             queue_manager.save_queues()
-            await interaction.response.send_message(f"Moved '{self.entry.title}' to the top of the queue.", ephemeral=True)
+            await interaction.followup.send(f"Moved '{self.entry.title}' to the top of the queue.", ephemeral=True)
             await self.refresh_view(interaction)
         else:
-            await interaction.response.send_message(f"'{self.entry.title}' is already at the top of the queue.", ephemeral=True)
+            await interaction.followup.send(f"'{self.entry.title}' is already at the top of the queue.", ephemeral=True)
 
     async def move_to_bottom_button_callback(self, interaction: discord.Interaction):
-        logging.debug("Move to bottom button callback triggered")
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
+        await interaction.response.defer()  # Defer the response
+        server_id = str(interaction.guild.id)
+        queue = queue_manager.get_queue(server_id)
         entry_index = queue.index(self.entry)
         
         if entry_index < len(queue) - 1:
             queue.append(queue.pop(entry_index))
             self.entry.has_been_arranged = True
             queue_manager.save_queues()
-            await interaction.response.send_message(f"Moved '{self.entry.title}' to the bottom of the queue.", ephemeral=True)
+            await interaction.followup.send(f"Moved '{self.entry.title}' to the bottom of the queue.", ephemeral=True)
             await self.refresh_view(interaction)
+        else:
+            await interaction.followup.send(f"'{self.entry.title}' is already at the bottom of the queue.", ephemeral=True)
 
 async def send_now_playing(interaction, entry, paused=False):
     logging.debug(f"Sending now playing message for: {entry.title}")
@@ -784,11 +841,18 @@ async def send_now_playing(interaction, entry, paused=False):
     embed.add_field(name="URL", value=entry.video_url, inline=False)
     embed.add_field(name="Favorited by", value=', '.join([user['name'] for user in entry.favorited_by]), inline=False)
 
-    view = ButtonView(interaction.client, entry, paused=paused)
+    view = ButtonView(interaction.client, entry, paused=paused, current_user=interaction.user)
     message = await interaction.channel.send(embed=embed, view=view)
-    if not paused:
+
+    if not paused and not queue_manager.currently_playing:
         entry.start_time = datetime.now()
     await update_progress_bar(interaction, message, entry)
+
+    # Store message ID and custom IDs to persist button views
+    interaction.client.message_views[message.id] = view
+    interaction.client.add_now_playing_message(message.id)
+
+    logging.debug(f"Now playing message sent with ID: {message.id}")
 
 class MusicCommands(commands.Cog):
     def __init__(self, bot):
@@ -808,8 +872,9 @@ class MusicCommands(commands.Cog):
     @app_commands.command(name='play_next', description='Move a specified track to the second position in the queue.')
     async def play_next(self, interaction: discord.Interaction, title: str = None, url: str = None, mp3_file: Optional[Attachment] = None):
         logging.debug(f"Play next command executed for title: {title}")
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
+        # await interaction.response.defer()  # Defer the interaction response
+        server_id = str(interaction.guild.id)
+        queue = queue_manager.get_queue(server_id)
 
         if url:
             if "list=" in url:
@@ -827,7 +892,7 @@ class MusicCommands(commands.Cog):
                                 playlist_index=index
                             )
                             queue.insert(index, entry)
-                            await interaction.channel.send(f"Added to queue: {entry.title}")
+                            await interaction.followup.send(f"Added to queue: {entry.title}")
                             if index == 1 or not interaction.guild.voice_client.is_playing():
                                 await play_audio(interaction, entry)
                     else:
@@ -837,7 +902,7 @@ class MusicCommands(commands.Cog):
                 entry = await process_single_video_or_mp3(url, interaction)
                 if entry:
                     queue.insert(1, entry)
-                    await interaction.channel.send(f"'{entry.title}' added to the queue at position 2.")
+                    await interaction.followup.send(f"'{entry.title}' added to the queue at position 2.")
                     if not interaction.guild.voice_client.is_playing():
                         await play_audio(interaction, entry)
             return
@@ -860,14 +925,14 @@ class MusicCommands(commands.Cog):
 
         entry_index = next((i for i, entry in enumerate(queue) if entry.title == title), None)
         if entry_index is None:
-            await interaction.response.send_message(f"No track found with title '{title}'.")
+            await interaction.followup.send(f"No track found with title '{title}'.")
             return
 
         entry = queue.pop(entry_index)
         queue.insert(1, entry)
         queue_manager.save_queues()
         
-        await interaction.response.send_message(f"Moved '{title}' to the second position in the queue.")
+        await interaction.followup.send(f"Moved '{title}' to the second position in the queue.")
 
     @app_commands.command(name='play', description='Play a URL or attached MP3 file.')
     async def play(self, interaction: discord.Interaction, url: str = None, mp3_file: Optional[Attachment] = None):
@@ -879,6 +944,8 @@ class MusicCommands(commands.Cog):
             return
 
         await interaction.response.defer()
+        server_id = str(interaction.guild.id)
+        queue_manager.ensure_queue_exists(server_id)
 
         if mp3_file:
             file_path = await download_file(mp3_file.url, 'Discord-Audio-Bot\\Discord-Audio-Bot\\downloaded-mp3s')
@@ -890,7 +957,7 @@ class MusicCommands(commands.Cog):
                     is_playlist=False,
                     playlist_index=None
                 )
-                queue_manager.add_to_queue(entry)
+                queue_manager.add_to_queue(server_id, entry)
                 if not voice_client.is_playing():
                     await play_audio(interaction, entry)
             await interaction.followup.send(f"Added {entry.title} to the queue.")
@@ -898,33 +965,14 @@ class MusicCommands(commands.Cog):
 
         if url:
             if "list=" in url:
-                playlist_length = await fetch_playlist_length(url)
-                for index in range(1, playlist_length + 1):
-                    video_info = await fetch_info(url, index=index)
-                    if video_info and 'entries' in video_info:
-                        video = video_info['entries'][0] if video_info['entries'] else None
-                        if video:
-                            entry = QueueEntry(
-                                video_url=video['webpage_url'],
-                                best_audio_url=next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), ''),
-                                title=video['title'],
-                                is_playlist=True,
-                                playlist_index=index
-                            )
-                            queue_manager.add_to_queue(entry)
-                            await interaction.channel.send(f"Added to queue: {entry.title}")
-                            if index == 1 or not voice_client.is_playing():
-                                await play_audio(interaction, entry)
-                    else:
-                        await interaction.followup.send(f"Failed to retrieve video at index {index}")
-                        break
+                await process_play_command(interaction, url)
             else:
                 entry = await process_single_video_or_mp3(url, interaction)
                 if entry:
-                    queue_manager.add_to_queue(entry)
+                    queue_manager.add_to_queue(server_id, entry)
                     if not voice_client.is_playing():
                         await play_audio(interaction, entry)
-            await interaction.followup.send(f"Added '{entry.title}' to the queue.")
+                await interaction.followup.send(f"Added '{entry.title}' to the queue.")
             return
         else:
             await interaction.followup.send("Please provide a valid URL or attach an MP3 file.")
@@ -932,13 +980,13 @@ class MusicCommands(commands.Cog):
     @app_commands.command(name='previous', description='Play the last entry that was being played.')
     async def previous(self, interaction: discord.Interaction):
         logging.debug("Previous command executed")
-        last_played = queue_manager.last_played_audio
+        server_id = str(interaction.guild.id)
+        last_played = queue_manager.last_played_audio.get(server_id)
         if not last_played:
             await interaction.response.send_message("There was nothing played prior.")
             return
 
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
+        queue = queue_manager.get_queue(server_id)
         entry = next((e for e in queue if e.title == last_played), None)
 
         if not entry:
@@ -1126,8 +1174,8 @@ class MusicCommands(commands.Cog):
         logging.debug(f"Play video command executed for title: {title}")
         await interaction.response.defer()  # Defer the interaction response
 
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
+        server_id = str(interaction.guild.id)
+        queue = queue_manager.get_queue(server_id)
 
         entry_index = next((i for i, entry in enumerate(queue) if entry.title == title), None)
         if entry_index is None:
@@ -1162,8 +1210,8 @@ class MusicCommands(commands.Cog):
     @app_commands.command(name='remove_by_title', description='Remove a track from the queue by title.')
     async def remove_by_title(self, interaction: discord.Interaction, title: str):
         logging.debug(f"Remove by title command executed for title: {title}")
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
+        server_id = str(interaction.guild.id)
+        queue = queue_manager.get_queue(server_id)
         if not queue:
             await interaction.response.send_message("The queue is currently empty.")
             return
@@ -1173,15 +1221,15 @@ class MusicCommands(commands.Cog):
         if len(queue) == original_length:
             await interaction.response.send_message(f"No track found with title '{title}'.")
         else:
-            queue_manager.queues[today_str] = queue
+            queue_manager.queues[server_id] = queue
             queue_manager.save_queues()
             await interaction.response.send_message(f"Removed '{title}' from the queue.")
 
     @app_commands.command(name='shuffle', description='Shuffle the current queue.')
     async def shuffle(self, interaction: discord.Interaction):
         logging.debug("Shuffle command executed")
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
+        server_id = str(interaction.guild.id)
+        queue = queue_manager.get_queue(server_id)
         if not queue:
             await interaction.response.send_message("The queue is currently empty.")
             return
@@ -1191,7 +1239,7 @@ class MusicCommands(commands.Cog):
         random.shuffle(queue)
         for entry in queue:
             entry.has_been_arranged = False
-        queue_manager.queues[today_str] = queue
+        queue_manager.queues[server_id] = queue
         queue_manager.save_queues()
 
         titles = [entry.title for entry in queue]
@@ -1212,8 +1260,8 @@ class MusicCommands(commands.Cog):
         
         await interaction.response.defer()  # Defer the response to give more time for processing
 
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
+        server_id = str(interaction.guild.id)
+        queue = queue_manager.get_queue(server_id)
         if not queue:
             await interaction.followup.send("Queue is empty, please add some tracks first.")
             return
@@ -1234,7 +1282,8 @@ class MusicCommands(commands.Cog):
     @app_commands.command(name='list_queue', description='List all entries in the current queue.')
     async def list_queue(self, interaction: discord.Interaction):
         logging.debug("List queue command executed")
-        queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
+        server_id = str(interaction.guild.id)
+        queue = queue_manager.get_queue(server_id)
         if not queue:
             await interaction.response.send_message("The queue is currently empty.")
         else:
@@ -1253,7 +1302,8 @@ class MusicCommands(commands.Cog):
     @app_commands.command(name='remove_queue', description='Remove a track from the queue by index.')
     async def remove_queue(self, interaction: discord.Interaction, index: int):
         logging.debug(f"Remove queue command executed for index: {index}")
-        queue = queue_manager.get_queue(datetime.now().strftime('%Y-%m-%d'))
+        server_id = str(interaction.guild.id)
+        queue = queue_manager.get_queue(server_id)
         adjusted_index = index - 1
 
         if 0 <= adjusted_index < len(queue):
@@ -1266,8 +1316,8 @@ class MusicCommands(commands.Cog):
     @app_commands.command(name='skip', description='Skip the current track.')
     async def skip(self, interaction: discord.Interaction):
         logging.debug("Skip command executed")
-        date_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(date_str)
+        server_id = str(interaction.guild.id)
+        queue = queue_manager.get_queue(server_id)
         if not queue:
             await interaction.response.send_message("Queue is empty.")
             return
@@ -1278,7 +1328,6 @@ class MusicCommands(commands.Cog):
                 queue.remove(current_entry)
                 queue.append(current_entry)
                 queue_manager.save_queues()
-
             interaction.guild.voice_client.stop()
             await asyncio.sleep(0.5)
             # queue_manager.has_been_shuffled = False
@@ -1341,17 +1390,33 @@ class MusicCommands(commands.Cog):
 
     @commands.command(name='mp3_list')
     async def mp3_list(self, ctx, url: str = None):
+        logging.debug("mp3_list command invoked")
+        print("mp3_list command invoked")
+
         voice_client = discord.utils.get(ctx.bot.voice_clients, guild=ctx.guild)
         if not voice_client and ctx.author.voice:
+            logging.debug("Connecting to voice channel")
+            print("Connecting to voice channel")
             voice_client = await ctx.author.voice.channel.connect()
         elif not voice_client:
+            logging.warning("User is not connected to a voice channel")
+            print("User is not connected to a voice channel")
             await ctx.send("You are not connected to a voice channel.")
             return
 
+        server_id = str(ctx.guild.id)
+        queue_manager.ensure_queue_exists(server_id)
+        logging.debug(f"Queue exists ensured for server {server_id}")
+        print(f"Queue exists ensured for server {server_id}")
+
         if ctx.message.attachments:
+            logging.debug("Processing attachments")
+            print("Processing attachments")
             first = True
             for attachment in ctx.message.attachments:
                 if attachment.filename.lower().endswith('.mp3'):
+                    logging.info(f"Downloading attachment: {attachment.filename}")
+                    print(f"Downloading attachment: {attachment.filename}")
                     file_path = await download_file(attachment.url, 'Discord-Audio-Bot\\Discord-Audio-Bot\\downloaded-mp3s')
                     if file_path:
                         entry = QueueEntry(
@@ -1362,7 +1427,9 @@ class MusicCommands(commands.Cog):
                             playlist_index=None,
                             duration=0  # Assuming duration is 0 for MP3 files as we might not have a way to extract it
                         )
-                        queue_manager.add_to_queue(entry)
+                        queue_manager.add_to_queue(server_id, entry)
+                        logging.info(f"Added '{entry.title}' to queue")
+                        print(f"Added '{entry.title}' to queue")
                         await ctx.send(f"'{entry.title}' added to the queue.")
                         if first or not voice_client.is_playing():
                             await play_audio(ctx, entry)
@@ -1370,7 +1437,11 @@ class MusicCommands(commands.Cog):
             return
 
         elif url:
+            logging.debug(f"Processing URL: {url}")
+            print(f"Processing URL: {url}")
             if "list=" in url:
+                logging.info("Processing playlist URL")
+                print("Processing playlist URL")
                 playlist_length = await fetch_playlist_length(url)
                 for index in range(1, playlist_length + 1):
                     video_info = await fetch_info(url, index=index)
@@ -1385,36 +1456,46 @@ class MusicCommands(commands.Cog):
                                 playlist_index=index,
                                 duration=video.get('duration', 0)
                             )
-                            queue_manager.add_to_queue(entry)
+                            queue_manager.add_to_queue(server_id, entry)
+                            logging.info(f"Added to queue: {entry.title}")
+                            print(f"Added to queue: {entry.title}")
                             await ctx.send(f"Added to queue: {entry.title}")
                             if index == 1 or not voice_client.is_playing():
                                 await play_audio(ctx, entry)
                     else:
+                        logging.warning(f"Failed to retrieve video at index {index}")
+                        print(f"Failed to retrieve video at index {index}")
                         await ctx.send(f"Failed to retrieve video at index {index}")
                         break
             else:
                 entry = await process_single_video_or_mp3(url, ctx)
                 if entry:
-                    queue_manager.add_to_queue(entry)
+                    queue_manager.add_to_queue(server_id, entry)
+                    logging.info(f"Added '{entry.title}' to the queue")
+                    print(f"Added '{entry.title}' to the queue")
                     await ctx.send(f"'{entry.title}' added to the queue.")
                     if not voice_client.is_playing():
                         await play_audio(ctx, entry)
             return
         else:
+            logging.warning("No valid URL or attachment provided")
+            print("No valid URL or attachment provided")
             await ctx.send("Please provide a valid URL or attach an MP3 file.")
+
 
     @app_commands.autocomplete(title="title_autocomplete")
     async def title_autocomplete(self, interaction: discord.Interaction, current: str):
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
+        server_id = str(interaction.guild.id)
+        queue_manager.ensure_queue_exists(server_id)
+        queue = queue_manager.get_queue(server_id)
         titles = [entry.title for entry in queue if current.lower() in entry.title.lower()]
         return [app_commands.Choice(name=title, value=title) for title in titles[:25]]
 
     @app_commands.command(name="search_and_play_from_queue", description="Search the current queue")
     @app_commands.autocomplete(title=title_autocomplete)
     async def search(self, interaction: discord.Interaction, title: str):
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        queue = queue_manager.get_queue(today_str)
+        server_id = str(interaction.guild.id)
+        queue = queue_manager.get_queue(server_id)
 
         entry_index = next((i for i, entry in enumerate(queue) if entry.title == title), None)
         if entry_index is None:
@@ -1437,23 +1518,24 @@ class MusicCommands(commands.Cog):
         await play_audio(interaction, entry)
         await interaction.response.send_message(f"Playing: {entry.title}")
     
-    @app_commands.command(name='clear_queue', description='Clear the queue for today except the currently playing entry.')
+    @app_commands.command(name='clear_queue', description='Clear the queue except the currently playing entry.')
     async def clear_queue(self, interaction: discord.Interaction):
         logging.debug("Clear queue command executed")
-        today_str = datetime.now().strftime('%Y-%m-%d')
+        server_id = str(interaction.guild.id)
         current_entry = queue_manager.currently_playing
-        if today_str in queue_manager.queues:
-            if current_entry and current_entry in queue_manager.queues[today_str]:
-                queue_manager.queues[today_str] = [current_entry]
+        if server_id in queue_manager.queues:
+            if current_entry and current_entry in queue_manager.queues[server_id]:
+                queue_manager.queues[server_id] = [current_entry]
             else:
-                queue_manager.queues[today_str] = []
+                queue_manager.queues[server_id] = []
             queue_manager.save_queues()
-            await interaction.response.send_message(f"The queue for {today_str} has been cleared, except the currently playing entry.")
+            await interaction.response.send_message(f"The queue for server '{interaction.guild.name}' has been cleared, except the currently playing entry.")
         else:
-            await interaction.response.send_message(f"There is no queue for {today_str} to clear.")
+            await interaction.response.send_message(f"There is no queue for server '{interaction.guild.name}' to clear.")
             
     @app_commands.command(name='search_youtube', description='Search for a YouTube video and add its audio to the queue.')
     async def search_youtube(self, interaction: discord.Interaction, query: str):
+        server_id = str(interaction.guild.id)
         logging.debug(f"Search YouTube command executed for query: {query}")
         await interaction.response.defer()  # Defer the response to get more time
 
@@ -1495,8 +1577,7 @@ class MusicCommands(commands.Cog):
                 duration=duration
             )
 
-            date_str = datetime.now().strftime('%Y-%m-%d')
-            queue = queue_manager.get_queue(date_str)
+            queue = queue_manager.get_queue(server_id)
 
             if not queue_manager.currently_playing:
                 queue.insert(0, entry)
