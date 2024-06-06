@@ -19,7 +19,7 @@ from youtubesearchpython import VideosSearch
 logging.basicConfig(level=logging.DEBUG, filename='queue_log.log', format='%(asctime)s:%(levelname)s:%(message)s')
 
 class QueueEntry:
-    def __init__(self, video_url: str, best_audio_url: str, title: str, is_playlist: bool, thumbnail: str = '', playlist_index: Optional[int] = None, duration: int = 0, is_favorited: bool = False, favorited_by: Optional[List[Dict[str, str]]] = None, has_been_arranged: bool = False, timestamp: Optional[str] = None, paused_duration: Optional[float] = 0.0, guild: Optional[discord.Guild] = None):
+    def __init__(self, video_url: str, best_audio_url: str, title: str, is_playlist: bool, thumbnail: str = '', playlist_index: Optional[int] = None, duration: int = 0, is_favorited: bool = False, favorited_by: Optional[List[Dict[str, str]]] = None, has_been_arranged: bool = False, has_been_played_after_arranged: bool = False, timestamp: Optional[str] = None, paused_duration: Optional[float] = 0.0, guild: Optional[discord.Guild] = None):
         logging.debug(f"Creating QueueEntry: {title}, URL: {video_url}")
         self.video_url = video_url
         self.best_audio_url = best_audio_url
@@ -31,6 +31,7 @@ class QueueEntry:
         self.is_favorited = is_favorited
         self.favorited_by = favorited_by if favorited_by is not None else []
         self.has_been_arranged = has_been_arranged
+        self.has_been_played_after_arranged = has_been_played_after_arranged  # New property
         self.timestamp = timestamp or datetime.now().isoformat()
         self.pause_start_time = None
         self.start_time = datetime.now()
@@ -49,6 +50,7 @@ class QueueEntry:
             'is_favorited': self.is_favorited,
             'favorited_by': self.favorited_by,
             'has_been_arranged': self.has_been_arranged,
+            'has_been_played_after_arranged': self.has_been_played_after_arranged,  # New property
             'timestamp': self.timestamp,
             'paused_duration': self.paused_duration.total_seconds()
         }
@@ -130,7 +132,6 @@ queue_manager = BotQueue()
 executor = ThreadPoolExecutor(max_workers=1)
 
 async def fetch_info(url, index: int = None):
-    logging.debug(f"Fetching info for URL: {url}, Index: {index}")
     ydl_opts = {
         'format': 'bestaudio/best',
         'noplaylist': False if "list=" in url else True,
@@ -142,28 +143,36 @@ async def fetch_info(url, index: int = None):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.get_running_loop().run_in_executor(executor, lambda: ydl.extract_info(url, download=False))
             if 'entries' in info:
+                entries = []
                 for entry in info['entries']:
-                    entry['duration'] = entry.get('duration', 0)
-                    entry['thumbnail'] = entry.get('thumbnail', '')
-                    entry['best_audio_url'] = next((f['url'] for f in entry['formats'] if f.get('acodec') != 'none'), entry.get('url'))
+                    if entry and not entry.get('is_unavailable', False):  # Ensure the entry is valid and available
+                        entry['duration'] = entry.get('duration', 0)
+                        entry['thumbnail'] = entry.get('thumbnail', '')
+                        entry['best_audio_url'] = next((f['url'] for f in entry['formats'] if f.get('acodec') != 'none'), entry.get('url'))
+                        entries.append(entry)
+                        logging.debug(f"Processing entry: {entry.get('title', 'Unknown title')}")
+                info['entries'] = entries
             else:
                 info['duration'] = info.get('duration', 0)
                 info['thumbnail'] = info.get('thumbnail', '')
                 info['best_audio_url'] = next((f['url'] for f in info['formats'] if f.get('acodec') != 'none'), info.get('url'))
-            logging.info(f"Fetched info: {info}")
+                logging.debug(f"Processing entry: {info.get('title', 'Unknown title')}")
             return info
     except yt_dlp.utils.ExtractorError as e:
         logging.warning(f"Skipping unavailable video: {str(e)}")
         return None
 
 async def fetch_playlist_length(url):
-    logging.debug(f"Fetching playlist length for URL: {url}")
-    ydl_opts = {'quiet': True, 'noplaylist': False, 'extract_entries': True}
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = await asyncio.get_running_loop().run_in_executor(executor, lambda: ydl.extract_info(url, download=False))
-        length = len(info.get('entries', []))
-        logging.info(f"Playlist length: {length}")
-        return length
+    ydl_opts = {'quiet': True, 'noplaylist': False, 'extract_entries': True, 'ignoreerrors': True}
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await asyncio.get_running_loop().run_in_executor(executor, lambda: ydl.extract_info(url, download=False))
+            length = len(info.get('entries', []))
+            logging.info(f"Playlist length: {length}")
+            return length
+    except yt_dlp.utils.ExtractorError as e:
+        logging.warning(f"Error fetching playlist length: {str(e)}")
+        return 0
 
 def sanitize_filename(filename: str) -> str:
     return re.sub(r'[^a-zA-Z0-9_\-.]', '_', filename)
@@ -199,7 +208,7 @@ async def play_audio(ctx_or_interaction, entry):
 
         entry.start_time = datetime.now()  # Reset start time for new entry
         entry.paused_duration = timedelta(0)  # Reset paused duration for new entry
-        entry.has_been_arranged = False  # Reset the has_been_arranged flag
+        # entry.has_been_arranged = False  # Reset the has_been_arranged flag
         queue_manager.currently_playing = entry  # Set the currently playing entry
         queue_manager.save_queues()
 
@@ -214,14 +223,16 @@ async def play_audio(ctx_or_interaction, entry):
             else:
                 logging.info(f"Finished playing {entry.title} at {datetime.now()}")
 
-                # Reset the has_been_arranged flag
-                entry.has_been_arranged = False
-
                 if not queue_manager.is_restarting and not queue_manager.has_been_shuffled and not queue_manager.loop:
                     queue = queue_manager.get_queue(server_id)
                     if entry in queue:
-                        queue.remove(entry)
-                        queue.append(entry)
+                        if entry.has_been_arranged and entry.has_been_played_after_arranged:
+                            entry.has_been_arranged = False
+                            entry.has_been_played_after_arranged = False
+                            queue.remove(entry)
+                            queue.append(entry)
+                        elif entry.has_been_arranged and not entry.has_been_played_after_arranged:
+                            entry.has_been_played_after_arranged = True
                         queue_manager.save_queues()
                         logging.info(f"Moved {entry.title} to the bottom of the queue")
 
@@ -254,7 +265,7 @@ async def play_audio(ctx_or_interaction, entry):
                 )
                 if not voice_client.is_playing():
                     voice_client.play(audio_source, after=after_playing)
-                    await send_now_playing(ctx_or_interaction, entry)
+                    asyncio.create_task(send_now_playing(ctx_or_interaction, entry))
                     queue_manager.has_been_shuffled = False
                     logging.info(f"Playback started for {entry.title} at {datetime.now()}")
             except Exception as e:
@@ -307,7 +318,7 @@ async def send_now_playing(interaction, entry, paused=False):
 
     if not paused and not queue_manager.currently_playing:
         entry.start_time = datetime.now()
-    await update_progress_bar(interaction, message, entry)
+    asyncio.create_task(update_progress_bar(interaction, message, entry))
 
     # Store message ID and custom IDs to persist button views
     interaction.client.message_views[message.id] = view
@@ -379,31 +390,31 @@ async def play_next(interaction):
             await play_audio(interaction, entry)
 
 async def process_play_command(interaction, url):
-    logging.debug(f"Processing play command for URL: {url}")
     server_id = str(interaction.guild.id)
     first_video_info = await fetch_info(url, index=1)
     if not first_video_info or 'entries' not in first_video_info or not first_video_info['entries']:
-        await interaction.response.send_message("Could not retrieve the first video of the playlist.")
+        await interaction.followup.send("Could not retrieve the first video of the playlist.")
         return
 
     first_video = first_video_info['entries'][0]
-    if first_video:
-        first_entry = QueueEntry(
-            video_url=first_video.get('webpage_url', ''),
-            best_audio_url=first_video.get('best_audio_url', ''),
-            title=first_video.get('title', 'Unknown title'),
-            is_playlist=True,
-            thumbnail=first_video.get('thumbnail', ''),
-            playlist_index=1,
-            duration=first_video.get('duration', 0)
-        )
-        queue_manager.add_to_queue(server_id, first_entry)
-        await interaction.response.send_message(f"Added to queue: {first_entry.title}")
-        await play_audio(interaction, first_entry)
-    else:
-        await interaction.response.send_message("No video found at the specified index.")
-        return
+    first_entry = QueueEntry(
+        video_url=first_video.get('webpage_url', ''),
+        best_audio_url=first_video.get('best_audio_url', ''),
+        title=first_video.get('title', 'Unknown title'),
+        is_playlist=True,
+        thumbnail=first_video.get('thumbnail', ''),
+        playlist_index=1,
+        duration=first_video.get('duration', 0)
+    )
+    queue_manager.add_to_queue(server_id, first_entry)
+    await interaction.followup.send(f"Added to queue: {first_entry.title}")
 
+    if not queue_manager.currently_playing:
+        await play_audio(interaction, first_entry)
+
+    asyncio.create_task(process_rest_of_playlist(interaction, url, server_id))
+
+async def process_rest_of_playlist(interaction, url, server_id):
     playlist_length = await fetch_playlist_length(url)
     if playlist_length > 1:
         for index in range(2, playlist_length + 1):
@@ -411,6 +422,10 @@ async def process_play_command(interaction, url):
                 info = await fetch_info(url, index=index)
                 if info and 'entries' in info and info['entries']:
                     video = info['entries'][0]
+                    if video.get('is_unavailable', False):
+                        logging.warning(f"Skipping unavailable video at index {index}")
+                        await interaction.followup.send(f"Skipping unavailable video at index {index}")
+                        continue
                     entry = QueueEntry(
                         video_url=video.get('webpage_url', ''),
                         best_audio_url=video.get('best_audio_url', ''),
@@ -421,21 +436,24 @@ async def process_play_command(interaction, url):
                         duration=video.get('duration', 0)
                     )
                     queue_manager.add_to_queue(server_id, entry)
-                    await interaction.channel.send(f"Added to queue: {entry.title}")
+                    await interaction.followup.send(f"Added to queue: {entry.title}")
                 else:
-                    await interaction.channel.send(f"Skipping unavailable video at index {index}")
+                    logging.warning(f"Skipping unavailable video at index {index}")
+                    await interaction.followup.send(f"Skipping unavailable video at index {index}")
             except yt_dlp.utils.ExtractorError as e:
                 logging.warning(f"Skipping unavailable video at index {index}: {str(e)}")
-                await interaction.channel.send(f"Skipping unavailable video at index {index}")
+                await interaction.followup.send(f"Skipping unavailable video at index {index}")
+            except Exception as e:
+                logging.error(f"Error processing video at index {index}: {str(e)}")
+                await interaction.followup.send(f"Error processing video at index {index}: {str(e)}")
 
     queue = queue_manager.get_queue(server_id)
     titles = [entry.title for entry in queue]
     response = "Current Queue:\n" + "\n".join(f"{idx+1}. {title}" for idx, title in enumerate(titles))
-    await interaction.response.send_message(response)
+    await interaction.followup.send(response)
 
 
 async def process_single_video_or_mp3(url, interaction):
-    logging.debug(f"Processing single video or MP3 for URL: {url}")
     if url.lower().endswith('.mp3'):
         return QueueEntry(video_url=url, best_audio_url=url, title=url.split('/')[-1], is_playlist=False)
     else:
@@ -871,8 +889,8 @@ class MusicCommands(commands.Cog):
 
     @app_commands.command(name='play_next', description='Move a specified track to the second position in the queue.')
     async def play_next(self, interaction: discord.Interaction, title: str = None, url: str = None, mp3_file: Optional[Attachment] = None):
+        await interaction.response.defer()  # Defer the interaction response
         logging.debug(f"Play next command executed for title: {title}")
-        # await interaction.response.defer()  # Defer the interaction response
         server_id = str(interaction.guild.id)
         queue = queue_manager.get_queue(server_id)
 
@@ -892,8 +910,9 @@ class MusicCommands(commands.Cog):
                                 playlist_index=index
                             )
                             queue.insert(index, entry)
-                            await interaction.followup.send(f"Added to queue: {entry.title}")
-                            if index == 1 or not interaction.guild.voice_client.is_playing():
+                            await interaction.followup.send(f"Added to queue: {entry.title} at position {index + 1}")
+                            queue_manager.save_queues()
+                            if not interaction.guild.voice_client.is_playing():
                                 await play_audio(interaction, entry)
                     else:
                         await interaction.followup.send(f"Failed to retrieve video at index {index}")
@@ -931,19 +950,19 @@ class MusicCommands(commands.Cog):
         entry = queue.pop(entry_index)
         queue.insert(1, entry)
         queue_manager.save_queues()
-        
         await interaction.followup.send(f"Moved '{title}' to the second position in the queue.")
 
     @app_commands.command(name='play', description='Play a URL or attached MP3 file.')
     async def play(self, interaction: discord.Interaction, url: str = None, mp3_file: Optional[Attachment] = None):
+        await interaction.response.defer()  # Defer the interaction response
+
         voice_client = interaction.guild.voice_client
         if not voice_client and interaction.user.voice:
             voice_client = await interaction.user.voice.channel.connect()
         elif not voice_client:
-            await interaction.response.send_message("You are not connected to a voice channel.")
+            await interaction.followup.send("You are not connected to a voice channel.")
             return
 
-        await interaction.response.defer()
         server_id = str(interaction.guild.id)
         queue_manager.ensure_queue_exists(server_id)
 
@@ -1324,13 +1343,21 @@ class MusicCommands(commands.Cog):
 
         if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
             current_entry = queue_manager.currently_playing
-            if current_entry and not queue_manager.has_been_shuffled:
-                queue.remove(current_entry)
-                queue.append(current_entry)
-                queue_manager.save_queues()
-            interaction.guild.voice_client.stop()
-            await asyncio.sleep(0.5)
-            # queue_manager.has_been_shuffled = False
+            if current_entry:
+                if current_entry.has_been_arranged and current_entry.has_been_played_after_arranged:
+                    current_entry.has_been_arranged = False
+                    current_entry.has_been_played_after_arranged = False
+                elif current_entry.has_been_arranged and not current_entry.has_been_played_after_arranged:
+                    current_entry.has_been_played_after_arranged = True
+                    queue.remove(current_entry)
+                    queue.append(current_entry)
+                    queue_manager.save_queues()
+                elif not queue_manager.has_been_shuffled:
+                    queue.remove(current_entry)
+                    queue.append(current_entry)
+                    queue_manager.save_queues()
+                interaction.guild.voice_client.stop()
+                await asyncio.sleep(0.5)
 
     @app_commands.command(name='pause', description='Pause the currently playing track.')
     async def pause(self, interaction: discord.Interaction):
