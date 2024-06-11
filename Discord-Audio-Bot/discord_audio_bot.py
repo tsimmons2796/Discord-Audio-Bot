@@ -1,37 +1,73 @@
+import aiohttp
+import asyncio
 import json
-import uuid
-from datetime import datetime, timedelta
 import logging
 import os
-import discord
-from discord.ext import commands
-from discord import app_commands, Attachment
-from dotenv import load_dotenv
-import yt_dlp
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import random
-import aiohttp
 import re
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional
+
+import discord
+from discord import app_commands, Attachment
+from discord.errors import NotFound
+from discord.ext import commands
+from discord.interactions import Interaction
+from discord.ui import Button, Select, View
+from dotenv import load_dotenv
+from lyricsgenius import Genius
+from mutagen.id3 import APIC, ID3, TIT2, TPE1
+from mutagen.mp3 import MP3
 from youtubesearchpython import VideosSearch
-from discord.ui import Select, View
+import yt_dlp
+
+load_dotenv()
+
+# Access the Genius API token
+GENIUS_API_TOKEN = os.getenv('genius_api_token')
+
+# Initialize the Genius API client
+genius = Genius(GENIUS_API_TOKEN)
 
 logging.basicConfig(level=logging.DEBUG, filename='queue_log.log', format='%(asctime)s:%(levelname)s:%(message)s')
 UNWANTED_PATTERNS = [
     r'\(Official Video\)', 
+    r'\(Visualizer\)', 
+    r'\(audio only\)', 
+    r'\(Official Music Video\)', 
     r'\[Official Visualizer\]',
     r'\(Lyrics\)',
     r'\(Lyric Video\)',
     r'\[Lyrics\]',
-    r'\(Lyrics)\\',
     r'\(HD\)',
     r'\[HD\]',
+    r'\[ Official Music Video \]',
+    r'\[ Official Visualizer \]',
+    r'\[ Visualizer \]',
     # Add more patterns as needed
 ]
 def sanitize_title(title: str) -> str:
-    pattern = r'[<>:"/\\|?*]'
-    sanitized_title = re.sub(pattern, '', title, flags=re.IGNORECASE)
+    """
+    Sanitize the given title by removing unwanted characters and patterns.
+
+    Args:
+        title (str): The original title of the song.
+
+    Returns:
+        str: The sanitized title.
+    """
+    # Define a pattern to match characters that are not allowed in file names.
+    illegal_characters_pattern = r'[<>:"/\\|?*]'
+    
+    # Remove illegal characters from the title.
+    sanitized_title = re.sub(illegal_characters_pattern, '', title, flags=re.IGNORECASE)
+    
+    # Remove unwanted patterns defined in UNWANTED_PATTERNS from the title.
+    for unwanted_pattern in UNWANTED_PATTERNS:
+        sanitized_title = re.sub(unwanted_pattern, '', sanitized_title, flags=re.IGNORECASE).strip()
+    
     return sanitized_title
 
 class QueueEntry:
@@ -209,6 +245,107 @@ async def download_file(url: str, dest_folder: str) -> str:
                 logging.error(f"Failed to download file: {url}")
                 return None
 
+async def get_lyrics(query: str) -> str:
+    def process_lyrics(lyrics: str) -> str:
+        lyrics = re.sub(r'(?i).*Lyrics', 'Lyrics', lyrics, count=1, flags=re.IGNORECASE).strip()
+        lyrics = re.sub(r'(?i)Embed.*$', '', lyrics, flags=re.IGNORECASE).strip()
+        if re.match(r'(?i)lyrics', lyrics[:15]):
+            lyrics = re.sub(r'(?i)lyrics', '', lyrics, count=1).strip()
+        return lyrics
+
+    def validate_lyrics(lyrics: str, title: str, artist: str) -> bool:
+        return title.lower() in lyrics.lower() and any(artist_part.lower() in song.artist.lower() for artist_part in artist.split())
+
+    try:
+        artist, title = None, None
+        print(f"Original query: {query}")
+        possible_splits = re.split(r' - | by | from | @ | \| ', query, maxsplit=1)
+        print(f"Possible splits: {possible_splits}")
+
+        if len(possible_splits) == 2:
+            artist, title = possible_splits
+            print(f"Extracted artist: {artist.strip()}, title: {title.strip()}")
+            song = genius.search_song(title.strip(), artist.strip())
+            if song:
+                lyrics = process_lyrics(song.lyrics)
+                print(f"Lyrics after processing:\n{lyrics}")
+                if validate_lyrics(lyrics, title.strip(), artist.strip()):
+                    print(f"Lyrics found for {artist.strip()} - {title.strip()}")
+                    return f"Lyrics for {artist.strip()} - {title.strip()}\n\n{lyrics}"
+                # else:
+                #     print(f"Lyrics not found for {title.strip()} by {artist.strip()}")
+                #     return f"Lyrics not found for {title.strip()} by {artist.strip()}"
+
+        print(f"Searching with the entire query: {query}")
+        song = genius.search_song(query)
+        if song:
+            lyrics = process_lyrics(song.lyrics)
+            print(f"Lyrics after processing:\n{lyrics}")
+            if validate_lyrics(lyrics, song.title, song.artist):
+                print(f"Lyrics found for {song.artist} - {song.title}")
+                return f"Lyrics for {song.artist} - {song.title}\n\n{lyrics}"
+            else:
+                print(f"Lyrics not found for {song.title} by {song.artist}")
+                return f"Lyrics not found for {song.title} by {song.artist}"
+
+        print("Lyrics not found.")
+        return "Lyrics not found."
+    except Exception as e:
+        logging.error(f"Error fetching lyrics: {e}")
+        print(f"Exception: {e}")
+        return "An error occurred while fetching the lyrics."
+
+def extract_mp3_metadata(file_path: str) -> dict:
+    """
+    Extract metadata from the given MP3 file.
+
+    Args:
+        file_path (str): The path to the MP3 file.
+
+    Returns:
+        dict: A dictionary containing the title, thumbnail, and duration of the MP3 file.
+    """
+    try:
+        audio = MP3(file_path, ID3=ID3)
+        
+        # Extract title and artist from the MP3 tags.
+        title = audio.tags.get('TIT2', None)
+        artist = audio.tags.get('TPE1', None)
+        thumbnail = None
+        
+        # Use the file name if title is not found in the tags.
+        if not title:
+            title = os.path.basename(file_path).replace('_', ' ')
+            title = title.rsplit('.mp3', 1)[0]
+        else:
+            title = title.text[0]
+        
+        if not artist:
+            artist = ''
+        else:
+            artist = artist.text[0]
+        
+        # Extract album art if available.
+        if 'APIC:' in audio.tags:
+            apic = audio.tags['APIC:']
+            thumbnail = apic.data
+        
+        # Extract the duration of the MP3 file.
+        duration = int(audio.info.length) if audio.info else 0
+        
+        return {
+            'title': f"{artist} - {title}".strip(' - '),
+            'thumbnail': thumbnail,
+            'duration': duration
+        }
+    except Exception as e:
+        logging.error(f"Error extracting metadata from {file_path}: {e}")
+        return {
+            'title': os.path.basename(file_path).replace('_', ' ').split('.mp3', 1)[0],
+            'thumbnail': None,
+            'duration': 0
+        }
+
 async def play_audio(ctx_or_interaction, entry):
     try:
         server_id = str(ctx_or_interaction.guild.id)
@@ -291,14 +428,22 @@ async def play_audio(ctx_or_interaction, entry):
 
         await start_playback()
         if isinstance(ctx_or_interaction, discord.Interaction):
-            if not ctx_or_interaction.response.is_done():
-                await ctx_or_interaction.followup.send(f"Now playing: {entry.title}")
+            try:
+                if not ctx_or_interaction.response.is_done():
+                    await ctx_or_interaction.followup.send(f"Now playing: {entry.title}")
+            except NotFound as e:
+                logging.error(f"Webhook not found: {e}")
+                await ctx_or_interaction.channel.send(f"Now playing: {entry.title}")
 
     except Exception as e:
         logging.error(f"Exception in play_audio: {e}")
         if isinstance(ctx_or_interaction, discord.Interaction):
-            if not ctx_or_interaction.response.is_done():
-                await ctx_or_interaction.followup.send(f"An error occurred: {e}")
+            try:
+                if not ctx_or_interaction.response.is_done():
+                    await ctx_or_interaction.followup.send(f"An error occurred: {e}")
+            except NotFound as e:
+                logging.error(f"Webhook not found: {e}")
+                await ctx_or_interaction.channel.send(f"An error occurred: {e}")
         else:
             await ctx_or_interaction.send(f"An error occurred: {e}")
 
@@ -327,80 +472,104 @@ async def update_entry_duration(entry):
 
 async def send_now_playing(ctx_or_interaction, entry, paused=False):
     logging.debug(f"Sending now playing message for: {entry.title}")
-    embed = discord.Embed(title="Now Playing", description=entry.title, url=entry.video_url)
-    embed.set_thumbnail(url=entry.thumbnail)
-    embed.add_field(name="URL", value=entry.video_url, inline=False)
-    embed.add_field(name="Favorited by", value=', '.join([user['name'] for user in entry.favorited_by]), inline=False)
-    embed.add_field(name="Progress", value="[                    ] 0:00 / 0:00", inline=False)  # Ensure the progress field exists
 
-    if isinstance(ctx_or_interaction, discord.Interaction):
-        bot = ctx_or_interaction.client
-        user = ctx_or_interaction.user
-    else:
-        bot = ctx_or_interaction.bot
-        user = ctx_or_interaction.author
-
-    view = ButtonView(bot, entry, paused=paused, current_user=user)
+    embed = create_now_playing_embed(entry)
+    view = ButtonView(ctx_or_interaction.client, entry, paused=paused, current_user=ctx_or_interaction.user)
     message = await ctx_or_interaction.channel.send(embed=embed, view=view)
 
     if not paused and not queue_manager.currently_playing:
         entry.start_time = datetime.now()
+
+    await schedule_progress_bar_update(ctx_or_interaction, message, entry)
+
+    store_message_info(ctx_or_interaction.client, message.id, view)
+
+    logging.debug(f"Now playing message sent with ID: {message.id}")
+
+def create_now_playing_embed(entry):
+    embed = discord.Embed(title="Now Playing", description=entry.title, url=entry.video_url)
+    embed.set_thumbnail(url=entry.thumbnail)
+
+    favorited_by = ', '.join([user['name'] for user in entry.favorited_by]) if entry.favorited_by else "No one"
+    embed.add_field(name="Favorited by", value=favorited_by, inline=False)
+
+    duration = entry.duration if hasattr(entry, 'duration') else 300
+    progress_bar, elapsed_str, duration_str = create_progress_bar(0, duration)
+    embed.add_field(name="Progress", value=f"{progress_bar} {elapsed_str} / {duration_str}", inline=False)
+
+    return embed
+
+def store_message_info(bot, message_id, view):
+    bot.message_views[message_id] = view
+    bot.add_now_playing_message(message_id)
+
+async def schedule_progress_bar_update(ctx_or_interaction, message, entry):
     await update_progress_bar(ctx_or_interaction, message, entry)
     asyncio.create_task(update_progress_bar(ctx_or_interaction, message, entry))
 
-    # Store message ID and custom IDs to persist button views
-    bot.message_views[message.id] = view
-    bot.add_now_playing_message(message.id)
+def create_progress_bar(progress, duration):
+    progress_bar = "[" + "=" * int(progress * 20) + " " * (20 - int(progress * 20)) + "]"
+    elapsed_str = str(timedelta(seconds=int(progress * duration)))
+    duration_str = str(timedelta(seconds=duration))
+    return progress_bar, elapsed_str, duration_str
 
-    logging.debug(f"Now playing message sent with ID: {message.id}")
 
 async def update_progress_bar(interaction, message, entry):
     logging.debug(f"Updating progress bar for: {entry.title}")
     duration = entry.duration if hasattr(entry, 'duration') else 300
+
     while True:
-        # Check if the currently playing entry is still the same as this entry
-        if queue_manager.currently_playing != entry:
+        if not is_entry_currently_playing(entry):
             logging.info(f"Stopping progress update for {entry.title} as it is no longer the currently playing entry.")
             break
 
-        if not interaction.guild.voice_client or not interaction.guild.voice_client.is_playing():
-            # Playback has stopped, update the progress one last time and break the loop
-            elapsed = (datetime.now() - entry.start_time - entry.paused_duration).total_seconds()
-            if elapsed > duration:
-                elapsed = duration
-            progress = elapsed / duration
-            progress_bar = "[" + "=" * int(progress * 20) + " " * (20 - int(progress * 20)) + "]"
-            elapsed_str = str(timedelta(seconds=int(elapsed)))
-            duration_str = str(timedelta(seconds=duration))
-
-            embed = message.embeds[0]
-            if len(embed.fields) > 2:
-                embed.set_field_at(2, name="Progress", value=f"{progress_bar} {elapsed_str} / {duration_str}", inline=False)
-            else:
-                embed.add_field(name="Progress", value=f"{progress_bar} {elapsed_str} / {duration_str}", inline=False)
-
-            view = ButtonView(interaction.client, entry, paused=False, current_user=interaction.user)
-            await message.edit(embed=embed, view=view)
+        if not is_playback_active(interaction):
+            await finalize_progress_update(interaction, message, entry, duration)
             break
 
-        elapsed = (datetime.now() - entry.start_time - entry.paused_duration).total_seconds()
-        if elapsed >= duration:
-            break
-        progress = elapsed / duration
-        progress_bar = "[" + "=" * int(progress * 20) + " " * (20 - int(progress * 20)) + "]"
-
-        elapsed_str = str(timedelta(seconds=int(elapsed)))
-        duration_str = str(timedelta(seconds=duration))
-
-        embed = message.embeds[0]
-        if len(embed.fields) > 2:
-            embed.set_field_at(2, name="Progress", value=f"{progress_bar} {elapsed_str} / {duration_str}", inline=False)
-        else:
-            embed.add_field(name="Progress", value=f"{progress_bar} {elapsed_str} / {duration_str}", inline=False)
-
-        view = ButtonView(interaction.client, entry, paused=False, current_user=interaction.user)
-        await message.edit(embed=embed, view=view)
+        await refresh_progress_bar(interaction, message, entry, duration)
+        await check_for_next_entry_refresh(interaction, entry, duration)
         await asyncio.sleep(1)
+
+def is_entry_currently_playing(entry):
+    return queue_manager.currently_playing == entry
+
+def is_playback_active(interaction):
+    return interaction.guild.voice_client and interaction.guild.voice_client.is_playing()
+
+async def finalize_progress_update(interaction, message, entry, duration):
+    elapsed = calculate_elapsed_time(entry, duration)
+    progress_bar, elapsed_str, duration_str = create_progress_bar(elapsed / duration, duration)
+    embed = update_embed_fields(message.embeds[0], entry, progress_bar, elapsed_str, duration_str)
+    view = ButtonView(interaction.client, entry, paused=False, current_user=interaction.user)
+    await message.edit(embed=embed, view=view)
+
+async def refresh_progress_bar(interaction, message, entry, duration):
+    elapsed = calculate_elapsed_time(entry, duration)
+    progress_bar, elapsed_str, duration_str = create_progress_bar(elapsed / duration, duration)
+    embed = update_embed_fields(message.embeds[0], entry, progress_bar, elapsed_str, duration_str)
+    view = ButtonView(interaction.client, entry, paused=False, current_user=interaction.user)
+    await message.edit(embed=embed, view=view)
+
+def calculate_elapsed_time(entry, duration):
+    elapsed = (datetime.now() - entry.start_time - entry.paused_duration).total_seconds()
+    return min(elapsed, duration)
+
+def update_embed_fields(embed, entry, progress_bar, elapsed_str, duration_str):
+    favorited_by = ', '.join([user['name'] for user in entry.favorited_by]) if entry.favorited_by else "No one"
+    embed.set_field_at(0, name="Favorited by", value=favorited_by, inline=False)
+    embed.set_field_at(1, name="Progress", value=f"{progress_bar} {elapsed_str} / {duration_str}", inline=False)
+    return embed
+
+async def check_for_next_entry_refresh(interaction, entry, duration):
+    elapsed = (datetime.now() - entry.start_time - entry.paused_duration).total_seconds()
+    if duration - elapsed <= 30:
+        server_id = str(interaction.guild.id)
+        queue = queue_manager.get_queue(server_id)
+        if len(queue) > 1:
+            next_entry = queue[1]
+            if datetime.now() - datetime.fromisoformat(next_entry.timestamp) > timedelta(hours=3):
+                await next_entry.refresh_url()
 
 
 async def play_next(interaction):
@@ -551,26 +720,28 @@ class ButtonView(discord.ui.View):
         self.entry = entry
         self.current_user = current_user
 
-        self.pause_button = discord.ui.Button(label="⏸️ Pause", style=discord.ButtonStyle.primary, custom_id=f"pause-{uuid.uuid4()}")
-        self.resume_button = discord.ui.Button(label="▶️ Resume", style=discord.ButtonStyle.primary, custom_id=f"resume-{uuid.uuid4()}")
-        self.stop_button = discord.ui.Button(label="⏹️ Stop", style=discord.ButtonStyle.danger, custom_id=f"stop-{uuid.uuid4()}")
-        self.skip_button = discord.ui.Button(label="⏭️ Skip", style=discord.ButtonStyle.secondary, custom_id=f"skip-{uuid.uuid4()}")
-        self.restart_button = discord.ui.Button(label="🔄 Restart", style=discord.ButtonStyle.secondary, custom_id=f"restart-{uuid.uuid4()}")
-        self.shuffle_button = discord.ui.Button(label="🔀 Shuffle", style=discord.ButtonStyle.secondary, custom_id=f"shuffle-{uuid.uuid4()}")
-        self.list_queue_button = discord.ui.Button(label="📜 List Queue", style=discord.ButtonStyle.secondary, custom_id=f"list_queue-{uuid.uuid4()}")
-        self.remove_button = discord.ui.Button(label="❌ Remove", style=discord.ButtonStyle.danger, custom_id=f"remove-{uuid.uuid4()}")
-        self.previous_button = discord.ui.Button(label="⏮️ Previous", style=discord.ButtonStyle.secondary, custom_id=f"previous-{uuid.uuid4()}")
-        self.loop_button = discord.ui.Button(label="🔁 Loop", style=discord.ButtonStyle.secondary, custom_id=f"loop-{uuid.uuid4()}")
-        self.move_up_button = discord.ui.Button(label="⬆️ Move Up", style=discord.ButtonStyle.secondary, custom_id=f"move_up-{uuid.uuid4()}")
-        self.move_down_button = discord.ui.Button(label="⬇️ Move Down", style=discord.ButtonStyle.secondary, custom_id=f"move_down-{uuid.uuid4()}")
-        self.move_to_top_button = discord.ui.Button(label="⬆️⬆️ Move to Top", style=discord.ButtonStyle.secondary, custom_id=f"move_to_top-{uuid.uuid4()}")
-        self.move_to_bottom_button = discord.ui.Button(label="⬇️⬇️ Move to Bottom", style=discord.ButtonStyle.secondary, custom_id=f"move_to_bottom-{uuid.uuid4()}")
+        self.pause_button = Button(label="⏸️ Pause", style=discord.ButtonStyle.primary, custom_id=f"pause-{uuid.uuid4()}")
+        self.resume_button = Button(label="▶️ Resume", style=discord.ButtonStyle.primary, custom_id=f"resume-{uuid.uuid4()}")
+        self.stop_button = Button(label="⏹️ Stop", style=discord.ButtonStyle.danger, custom_id=f"stop-{uuid.uuid4()}")
+        self.skip_button = Button(label="⏭️ Skip", style=discord.ButtonStyle.secondary, custom_id=f"skip-{uuid.uuid4()}")
+        self.restart_button = Button(label="🔄 Restart", style=discord.ButtonStyle.secondary, custom_id=f"restart-{uuid.uuid4()}")
+        self.shuffle_button = Button(label="🔀 Shuffle", style=discord.ButtonStyle.secondary, custom_id=f"shuffle-{uuid.uuid4()}")
+        self.list_queue_button = Button(label="📜 List Queue", style=discord.ButtonStyle.secondary, custom_id=f"list_queue-{uuid.uuid4()}")
+        self.remove_button = Button(label="❌ Remove", style=discord.ButtonStyle.danger, custom_id=f"remove-{uuid.uuid4()}")
+        self.previous_button = Button(label="⏮️ Previous", style=discord.ButtonStyle.secondary, custom_id=f"previous-{uuid.uuid4()}")
+        self.loop_button = Button(label="🔁 Loop", style=discord.ButtonStyle.secondary, custom_id=f"loop-{uuid.uuid4()}")
+        self.move_up_button = Button(label="⬆️ Move Up", style=discord.ButtonStyle.secondary, custom_id=f"move_up-{uuid.uuid4()}")
+        self.move_down_button = Button(label="⬇️ Move Down", style=discord.ButtonStyle.secondary, custom_id=f"move_down-{uuid.uuid4()}")
+        self.move_to_top_button = Button(label="⬆️⬆️ Move to Top", style=discord.ButtonStyle.secondary, custom_id=f"move_to_top-{uuid.uuid4()}")
+        self.move_to_bottom_button = Button(label="⬇️⬇️ Move to Bottom", style=discord.ButtonStyle.secondary, custom_id=f"move_to_bottom-{uuid.uuid4()}")
 
-        self.favorite_button = discord.ui.Button(
+        self.favorite_button = Button(
             label="⭐ Favorite" if not self.is_favorited_by_current_user() else "💛 Favorited",
             style=discord.ButtonStyle.secondary if not self.is_favorited_by_current_user() else discord.ButtonStyle.primary,
             custom_id=f"favorite-{uuid.uuid4()}"
         )
+
+        self.lyrics_button = Button(label="Lyrics", style=discord.ButtonStyle.secondary, custom_id=f"lyrics-{uuid.uuid4()}")
 
         self.pause_button.callback = self.pause_button_callback
         self.resume_button.callback = self.resume_button_callback
@@ -587,6 +758,7 @@ class ButtonView(discord.ui.View):
         self.move_to_top_button.callback = self.move_to_top_button_callback
         self.move_to_bottom_button.callback = self.move_to_bottom_button_callback
         self.favorite_button.callback = self.favorite_button_callback
+        self.lyrics_button.callback = self.lyrics_button_callback
 
         self.update_buttons()
 
@@ -598,7 +770,6 @@ class ButtonView(discord.ui.View):
                 await message.edit(view=self)
             except Exception as e:
                 logging.error(f"Error refreshing view for message {message_id}: {e}")
-
     def is_favorited_by_current_user(self):
         if self.current_user is None:
             return False
@@ -619,6 +790,7 @@ class ButtonView(discord.ui.View):
         self.add_item(self.remove_button)
         self.add_item(self.previous_button)
         self.add_item(self.favorite_button)
+        self.add_item(self.lyrics_button)
 
         logging.debug(f"Checking guild attribute for entry: {self.entry.title}")
 
@@ -644,6 +816,22 @@ class ButtonView(discord.ui.View):
     async def refresh_view(self, interaction):
         self.update_buttons()
         await interaction.message.edit(view=self)
+
+    async def lyrics_button_callback(self, interaction: discord.Interaction):
+        logging.debug(f"Lyrics button clicked for: {self.entry.title}")
+        await interaction.response.defer(ephemeral=True)
+
+        lyrics = await get_lyrics(self.entry.title)
+
+        if "Lyrics for " in lyrics:
+            lyrics_filename = f"{self.entry.title.replace(' ', '_')}_lyrics.txt"
+            with open(lyrics_filename, 'w', encoding='utf-8') as f:
+                f.write(lyrics)
+            file = discord.File(lyrics_filename, filename=lyrics_filename)
+            await interaction.followup.send(file=file)
+            os.remove(lyrics_filename)
+        else:
+            await interaction.followup.send(lyrics)
 
     async def loop_button_callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -681,7 +869,8 @@ class ButtonView(discord.ui.View):
 
     async def update_now_playing(self, interaction: discord.Interaction):
         embed = interaction.message.embeds[0]
-        embed.set_field_at(1, name="Favorited by", value=', '.join([user['name'] for user in self.entry.favorited_by]), inline=False)
+        favorited_by = ', '.join([user['name'] for user in self.entry.favorited_by]) if self.entry.favorited_by else "No one"
+        embed.set_field_at(0, name="Favorited by", value=favorited_by, inline=False)
         await interaction.message.edit(embed=embed, view=self)
 
     async def pause_button_callback(self, interaction: discord.Interaction):
@@ -903,49 +1092,11 @@ class ButtonView(discord.ui.View):
         else:
             await interaction.followup.send(f"'{self.entry.title}' is already at the bottom of the queue.", ephemeral=True)
 
-async def send_now_playing(ctx_or_interaction, entry, paused=False):
-    logging.debug(f"Sending now playing message for: {entry.title}")
-    embed = discord.Embed(title="Now Playing", description=entry.title, url=entry.video_url)
-    embed.set_thumbnail(url=entry.thumbnail)
-    embed.add_field(name="URL", value=entry.video_url, inline=False)
-    embed.add_field(name="Favorited by", value=', '.join([user['name'] for user in entry.favorited_by]), inline=False)
-    embed.add_field(name="Progress", value="[                    ] 0:00 / 0:00", inline=False)  # Ensure the progress field exists
-
-    if isinstance(ctx_or_interaction, discord.Interaction):
-        bot = ctx_or_interaction.client
-        user = ctx_or_interaction.user
-    else:
-        bot = ctx_or_interaction.bot
-        user = ctx_or_interaction.author
-
-    view = ButtonView(bot, entry, paused=paused, current_user=user)
-    message = await ctx_or_interaction.channel.send(embed=embed, view=view)
-
-    if not paused and not queue_manager.currently_playing:
-        entry.start_time = datetime.now()
-    await update_progress_bar(ctx_or_interaction, message, entry)
-    asyncio.create_task(update_progress_bar(ctx_or_interaction, message, entry))
-
-    # Store message ID and custom IDs to persist button views
-    bot.message_views[message.id] = view
-    bot.add_now_playing_message(message.id)
-
-    logging.debug(f"Now playing message sent with ID: {message.id}")
 
 class MusicCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         logging.debug("Initializing MusicCommands Cog")
-
-      # Do not comment out or get rid of this block  
-    # @app_commands.command(name='loop', description='Toggle looping of the current track.')
-    # async def loop(self, interaction: discord.Interaction):
-    #     if queue_manager.currently_playing:
-    #         queue_manager.loop = not queue_manager.loop
-    #         await interaction.response.send_message(f"Looping {'enabled' if queue_manager.loop else 'disabled'}.")
-    #         logging.info(f"Looping {'enabled' if queue_manager.loop else 'disabled'} for {queue_manager.currently_playing.title}")
-    #     else:
-    #         await interaction.response.send_message("No track is currently playing.")
 
     @app_commands.command(name='play_next_in_queue', description='Move a specified track to the second position in the queue.')
     async def play_next(self, interaction: discord.Interaction, url: str = None, mp3_file: Optional[Attachment] = None):
@@ -989,12 +1140,15 @@ class MusicCommands(commands.Cog):
         if mp3_file:
             file_path = await download_file(mp3_file.url, 'Discord-Audio-Bot\\Discord-Audio-Bot\\downloaded-mp3s')
             if file_path:
+                metadata = extract_mp3_metadata(file_path)
                 entry = QueueEntry(
                     video_url=mp3_file.url,
                     best_audio_url=file_path,
-                    title=mp3_file.filename,
+                    title=metadata['title'],
                     is_playlist=False,
-                    playlist_index=None
+                    playlist_index=None,
+                    thumbnail=metadata['thumbnail'],
+                    duration=metadata['duration']
                 )
                 queue.insert(1, entry)
                 await interaction.followup.send(f"Added {entry.title} to the queue at position 2.")
@@ -1015,29 +1169,30 @@ class MusicCommands(commands.Cog):
 
         server_id = str(interaction.guild.id)
         queue_manager.ensure_queue_exists(server_id)
+        queue = queue_manager.get_queue(server_id)
 
         if mp3_file:
             file_path = await download_file(mp3_file.url, 'Discord-Audio-Bot\\Discord-Audio-Bot\\downloaded-mp3s')
             if file_path:
+                metadata = extract_mp3_metadata(file_path)
                 entry = QueueEntry(
                     video_url=mp3_file.url,
                     best_audio_url=file_path,
-                    title=mp3_file.filename,
+                    title=metadata['title'],
                     is_playlist=False,
-                    playlist_index=None
+                    playlist_index=None,
+                    thumbnail=metadata['thumbnail'],
+                    duration=metadata['duration']
                 )
                 queue_manager.add_to_queue(server_id, entry)
-                if not voice_client.is_playing():
+                if not interaction.guild.voice_client.is_playing():
                     await play_audio(interaction, entry)
-            await interaction.followup.send(f"Added {entry.title} to the queue.")
+                await interaction.followup.send(f"Added {entry.title} to the queue.")
             return
 
         if youtube_title:
             logging.debug(f"Search YouTube command executed for query: {youtube_title}")
-            # await interaction.response.defer()  # Defer the response to get more time
-
             try:
-                # Perform the YouTube search
                 videos_search = VideosSearch(youtube_title, limit=1)
                 search_result = videos_search.result()
 
@@ -1051,20 +1206,17 @@ class MusicCommands(commands.Cog):
                 thumbnail = video_info['thumbnails'][0]['url']
                 duration_str = video_info.get('duration', '0:00')
 
-                # Convert duration to seconds
                 duration_parts = list(map(int, duration_str.split(':')))
                 if len(duration_parts) == 2:
                     duration = duration_parts[0] * 60 + duration_parts[1]
                 else:
                     duration = duration_parts[0]
 
-                # Fetch the audio URL
                 ydl_opts = {'format': 'bestaudio/best', 'noplaylist': True, 'ignoreerrors': True}
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = await asyncio.get_running_loop().run_in_executor(None, lambda: ydl.extract_info(video_url, download=False))
                     best_audio_url = next((f['url'] for f in info['formats'] if f.get('acodec') != 'none'), video_url)
 
-                # Create a QueueEntry and add it to the queue
                 entry = QueueEntry(
                     video_url=video_url,
                     best_audio_url=best_audio_url,
@@ -1073,8 +1225,6 @@ class MusicCommands(commands.Cog):
                     thumbnail=thumbnail,
                     duration=duration
                 )
-
-                queue = queue_manager.get_queue(server_id)
 
                 if not queue_manager.currently_playing:
                     queue.insert(0, entry)
@@ -1087,13 +1237,14 @@ class MusicCommands(commands.Cog):
                             return
                     await play_audio(interaction, entry)
                 else:
-                    queue_manager.add_to_queue(server_id, entry)  # Corrected call to add_to_queue with server_id and entry
+                    queue_manager.add_to_queue(server_id, entry)
 
                 await interaction.followup.send(f"Added to queue: {title}")
 
             except Exception as e:
                 logging.error(f"Error in search_youtube command: {e}")
                 await interaction.followup.send("An error occurred while searching for the video.")
+            return
 
         if youtube_url:
             if "list=" in youtube_url:
@@ -1102,14 +1253,14 @@ class MusicCommands(commands.Cog):
                 entry = await process_single_video_or_mp3(youtube_url, interaction)
                 if entry:
                     if not queue_manager.currently_playing:
-                        queue_manager.queues[server_id].insert(0, entry)
+                        queue.insert(0, entry)
                         await play_audio(interaction, entry)
                     else:
                         queue_manager.add_to_queue(server_id, entry)
-                await interaction.followup.send(f"Added '{entry.title}' to the queue.")
+                    await interaction.followup.send(f"Added '{entry.title}' to the queue.")
             return
-        else:
-            await interaction.followup.send("Please provide a valid URL, YouTube video title, or attach an MP3 file.")
+
+        await interaction.followup.send("Please provide a valid URL, YouTube video title, or attach an MP3 file.")
 
     @app_commands.command(name='previous', description='Play the last entry that was being played.')
     async def previous(self, interaction: discord.Interaction):
@@ -1484,6 +1635,62 @@ class MusicCommands(commands.Cog):
             interaction.guild.voice_client.stop()
             await asyncio.sleep(0.5)
             await play_audio(interaction, current_entry)
+            
+    @commands.command(name='mp3_list_next')
+    async def mp3_list_next(self, ctx):
+        logging.debug("mp3_list_next command invoked")
+        print("mp3_list_next command invoked")
+
+        voice_client = discord.utils.get(ctx.bot.voice_clients, guild=ctx.guild)
+        if not voice_client and ctx.author.voice:
+            logging.debug("Connecting to voice channel")
+            print("Connecting to voice channel")
+            voice_client = await ctx.author.voice.channel.connect()
+        elif not voice_client:
+            logging.warning("User is not connected to a voice channel")
+            print("User is not connected to a voice channel")
+            await ctx.send("You are not connected to a voice channel.")
+            return
+
+        server_id = str(ctx.guild.id)
+        queue_manager.ensure_queue_exists(server_id)
+        logging.debug(f"Queue exists ensured for server {server_id}")
+        print(f"Queue exists ensured for server {server_id}")
+
+        if ctx.message.attachments:
+            logging.debug("Processing attachments")
+            print("Processing attachments")
+            current_index = 1
+            for attachment in ctx.message.attachments:
+                if attachment.filename.lower().endswith('.mp3'):
+                    logging.info(f"Downloading attachment: {attachment.filename}")
+                    print(f"Downloading attachment: {attachment.filename}")
+                    file_path = await download_file(attachment.url, 'Discord-Audio-Bot\\Discord-Audio-Bot\\downloaded-mp3s')
+                    if file_path:
+                        metadata = extract_mp3_metadata(file_path)
+                        entry = QueueEntry(
+                            video_url=attachment.url,
+                            best_audio_url=file_path,
+                            title=metadata['title'],
+                            is_playlist=False,
+                            playlist_index=None,
+                            thumbnail=metadata['thumbnail'],
+                            duration=metadata['duration']
+                        )
+                        queue = queue_manager.get_queue(server_id)
+                        queue.insert(current_index, entry)
+                        current_index += 1
+                        queue_manager.save_queues()
+                        logging.info(f"Added '{entry.title}' to queue at position {current_index}")
+                        print(f"Added '{entry.title}' to queue at position {current_index}")
+                        await ctx.send(f"'{entry.title}' added to the queue at position {current_index}.")
+                        if not voice_client.is_playing() and current_index == 2:
+                            await play_audio(ctx, entry)
+            return
+        else:
+            logging.warning("No valid URL or attachment provided")
+            print("No valid URL or attachment provided")
+            await ctx.send("Please provide a valid URL or attach an MP3 file.")
 
     @commands.command(name='mp3_list')
     async def mp3_list(self, ctx, url: str = None):
@@ -1516,13 +1723,15 @@ class MusicCommands(commands.Cog):
                     print(f"Downloading attachment: {attachment.filename}")
                     file_path = await download_file(attachment.url, 'Discord-Audio-Bot\\Discord-Audio-Bot\\downloaded-mp3s')
                     if file_path:
+                        metadata = extract_mp3_metadata(file_path)
                         entry = QueueEntry(
                             video_url=attachment.url,
                             best_audio_url=file_path,
-                            title=attachment.filename,
+                            title=metadata['title'],
                             is_playlist=False,
                             playlist_index=None,
-                            duration=0  # Assuming duration is 0 for MP3 files as we might not have a way to extract it
+                            thumbnail=metadata['thumbnail'],
+                            duration=metadata['duration']
                         )
                         queue_manager.add_to_queue(server_id, entry)
                         logging.info(f"Added '{entry.title}' to queue")
@@ -1531,48 +1740,6 @@ class MusicCommands(commands.Cog):
                         if not voice_client.is_playing() and not first_entry_processed:
                             await play_audio(ctx, entry)
                             first_entry_processed = True
-            return
-
-        elif url:
-            logging.debug(f"Processing URL: {url}")
-            print(f"Processing URL: {url}")
-            if "list=" in url:
-                logging.info("Processing playlist URL")
-                print("Processing playlist URL")
-                playlist_length = await fetch_playlist_length(url)
-                for index in range(1, playlist_length + 1):
-                    video_info = await fetch_info(url, index=index)
-                    if video_info and 'entries' in video_info:
-                        video = video_info['entries'][0] if video_info['entries'] else None
-                        if video:
-                            entry = QueueEntry(
-                                video_url=video['webpage_url'],
-                                best_audio_url=next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), ''),
-                                title=video['title'],
-                                is_playlist=True,
-                                playlist_index=index,
-                                duration=video.get('duration', 0)
-                            )
-                            queue_manager.add_to_queue(server_id, entry)
-                            logging.info(f"Added to queue: {entry.title}")
-                            print(f"Added to queue: {entry.title}")
-                            await ctx.send(f"Added to queue: {entry.title}")
-                            if index == 1 or not voice_client.is_playing():
-                                await play_audio(ctx, entry)
-                    else:
-                        logging.warning(f"Failed to retrieve video at index {index}")
-                        print(f"Failed to retrieve video at index {index}")
-                        await ctx.send(f"Failed to retrieve video at index {index}")
-                        break
-            else:
-                entry = await process_single_video_or_mp3(url, ctx)
-                if entry:
-                    queue_manager.add_to_queue(server_id, entry)
-                    logging.info(f"Added '{entry.title}' to the queue")
-                    print(f"Added '{entry.title}' to the queue")
-                    await ctx.send(f"'{entry.title}' added to the queue.")
-                    if not voice_client.is_playing() or not voice_client.is_paused():
-                        await play_audio(ctx, entry)
             return
         else:
             logging.warning("No valid URL or attachment provided")
@@ -1613,7 +1780,6 @@ class MusicCommands(commands.Cog):
                 await interaction.user.voice.channel.connect()
 
         await play_audio(interaction, entry)
-        await interaction.response.send_message(f"Playing: {entry.title}")
 
     @app_commands.command(name='move_to_next', description="Move the specified track in the queue to the second position.")
     @app_commands.autocomplete(title=title_autocomplete)
@@ -1654,6 +1820,9 @@ class MusicCommands(commands.Cog):
         await interaction.response.defer()  # Defer the response to get more time
 
         try:
+            # Ensure the queue exists
+            queue_manager.ensure_queue_exists(server_id)
+
             # Perform the YouTube search
             videos_search = VideosSearch(query, limit=1)
             search_result = videos_search.result()
@@ -1692,10 +1861,10 @@ class MusicCommands(commands.Cog):
             )
 
             queue = queue_manager.get_queue(server_id)
+            queue.append(entry)
+            queue_manager.save_queues()
 
             if not queue_manager.currently_playing:
-                queue.insert(0, entry)
-                queue_manager.save_queues()
                 if not interaction.guild.voice_client:
                     if interaction.user.voice:
                         await interaction.user.voice.channel.connect()
@@ -1704,9 +1873,7 @@ class MusicCommands(commands.Cog):
                         return
                 await play_audio(interaction, entry)
             else:
-                queue_manager.add_to_queue(server_id, entry)  # Corrected call to add_to_queue with server_id and entry
-
-            await interaction.followup.send(f"Added to queue: {title}")
+                await interaction.followup.send(f"Added to queue: {title}")
 
         except Exception as e:
             logging.error(f"Error in search_youtube command: {e}")
