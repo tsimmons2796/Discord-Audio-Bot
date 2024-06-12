@@ -84,7 +84,8 @@ def sanitize_title(title: str) -> str:
 class QueueEntry:
     def __init__(self, video_url: str, best_audio_url: str, title: str, is_playlist: bool, thumbnail: str = '', playlist_index: Optional[int] = None, duration: int = 0, is_favorited: bool = False, favorited_by: Optional[List[Dict[str, str]]] = None, has_been_arranged: bool = False, has_been_played_after_arranged: bool = False, timestamp: Optional[str] = None, paused_duration: Optional[float] = 0.0, guild: Optional[discord.Guild] = None):
         logging.debug(f"Creating QueueEntry: {title}, URL: {video_url}")
-        print(f"Creating QueueEntry: {title}, URL: {video_url}")
+        logging.debug(f"Creating QueueEntry: {title}, URL: {video_url}, Guild: {guild}")
+        print(f"Creating QueueEntry: {title}, URL: {video_url}, Guild: {guild}")
         self.video_url = video_url
         self.best_audio_url = best_audio_url
         self.title = sanitize_title(title)  # Sanitize title here
@@ -100,7 +101,7 @@ class QueueEntry:
         self.pause_start_time = None
         self.start_time = datetime.now()
         self.paused_duration = timedelta(seconds=paused_duration) if isinstance(paused_duration, (int, float)) else timedelta(seconds=0.0)
-        self.guild = guild
+        self.guild = guild  # Ensure guild is set here
 
     def to_dict(self):
         logging.debug(f"Converting QueueEntry to dict: {self.title}")
@@ -146,6 +147,7 @@ class BotQueue:
         self.queue_file = 'queue.json'  # Ensure this path is correct
         self.currently_playing = None
         self.queues = self.load_queues()
+        self.queue_cache = {}
         self.last_played_audio = self.load_last_played_audio()
         self.is_restarting = False
         self.has_been_shuffled = False
@@ -190,6 +192,7 @@ class BotQueue:
                 json.dump(self.last_played_audio, file, indent=4)
                 logging.info("Last played audio saved successfully")
                 print("Last played audio saved successfully")
+            self.queue_cache = self.queues.copy()  # Update cache when saving
         except Exception as e:
             logging.error(f"Failed to save queues or last played audio: {e}")
             print(f"Failed to save queues or last played audio: {e}")
@@ -197,7 +200,12 @@ class BotQueue:
     def get_queue(self, server_id: str) -> List[QueueEntry]:
         logging.debug(f"Getting queue for server: {server_id}")
         print(f"Getting queue for server: {server_id}")
-        return self.queues.get(server_id, [])
+        if server_id in self.queue_cache:
+            return self.queue_cache[server_id]
+        else:
+            queue = self.queues.get(server_id, [])
+            self.queue_cache[server_id] = queue
+            return queue
 
     def add_to_queue(self, server_id: str, entry: QueueEntry):
         logging.debug(f"Adding {entry.title} to queue for server {server_id}")
@@ -205,6 +213,7 @@ class BotQueue:
         if server_id not in self.queues:
             self.queues[server_id] = []
         self.queues[server_id].append(entry)
+        self.queue_cache[server_id] = self.queues[server_id]  # Update cache
         self.save_queues()
         logging.info(f"Added {entry.title} to queue for server {server_id}")
         print(f"Added {entry.title} to queue for server {server_id}")
@@ -214,6 +223,7 @@ class BotQueue:
         print(f"Ensuring queue exists for server: {server_id}")
         if server_id not in self.queues:
             self.queues[server_id] = []
+            self.queue_cache[server_id] = self.queues[server_id]  # Update cache
             self.save_queues()
             logging.info(f"Ensured queue exists for server: {server_id}")
             print(f"Ensured queue exists for server: {server_id}")
@@ -405,36 +415,47 @@ async def play_audio(ctx_or_interaction, entry):
     try:
         server_id = str(ctx_or_interaction.guild.id)
         ensure_queue_exists(server_id)
-        
+
         await refresh_url_if_needed(entry)
+        entry.guild = ctx_or_interaction.guild  # Ensure guild is set
         if entry.duration == 0:
             await update_entry_duration(entry)
 
         set_currently_playing(entry)
 
-        after_callback = after_playing(ctx_or_interaction, entry)
-        await start_playback(ctx_or_interaction, entry, after_callback)
+        logging.info(f"Starting playback for: {entry.title} (URL: {entry.best_audio_url})")
+
+        def after_playing_callback(error):
+            handle_playback_end(ctx_or_interaction, entry, error)
+
+        await start_playback(ctx_or_interaction, entry, after_playing_callback)
 
         if isinstance(ctx_or_interaction, discord.Interaction):
-            try:
-                if not ctx_or_interaction.response.is_done():
-                    await ctx_or_interaction.followup.send(f"Now playing: {entry.title}")
-            except NotFound as e:
-                logging.error(f"Webhook not found: {e}")
-                await ctx_or_interaction.channel.send(f"Now playing: {entry.title}")
+            await send_now_playing_message(ctx_or_interaction, entry)
+
+        # Schedule a halfway point queue refresh
+        halfway_duration = entry.duration / 2
+        asyncio.create_task(schedule_halfway_queue_refresh(server_id, halfway_duration))
     except Exception as e:
-        logging.error(f"Exception in play_audio: {e}")
-        print(f"Exception in play_audio: {e}")
-        if isinstance(ctx_or_interaction, discord.Interaction):
-            try:
-                if not ctx_or_interaction.response.is_done():
-                    await ctx_or_interaction.followup.send(f"An error occurred: {e}")
-            except NotFound as e:
-                logging.error(f"Webhook not found: {e}")
-                await ctx_or_interaction.channel.send(f"An error occurred: {e}")
-        else:
-            await ctx_or_interaction.send(f"An error occurred: {e}")
-        await update_all_now_playing_messages(ctx_or_interaction, entry)
+        await handle_playback_exception(ctx_or_interaction, entry, e)
+
+async def schedule_halfway_queue_refresh(server_id, delay):
+    await asyncio.sleep(delay)
+    queue_manager.get_queue(server_id)
+    logging.debug(f"Queue refreshed at halfway point for server {server_id}")
+    print(f"Queue refreshed at halfway point for server {server_id}")
+
+def handle_playback_end(ctx_or_interaction, entry, error):
+    queue_manager.stop_is_triggered = False
+    if error:
+        logging.error(f"Error playing {entry.title}: {error}")
+        print(f"Error playing {entry.title}: {error}")
+        bot_client = ctx_or_interaction.client if isinstance(ctx_or_interaction, discord.Interaction) else ctx_or_interaction.bot
+        asyncio.run_coroutine_threadsafe(ctx_or_interaction.channel.send("Error occurred during playback."), bot_client.loop).result()
+    else:
+        logging.info(f"Finished playing {entry.title} at {datetime.now()}")
+        print(f"Finished playing {entry.title} at {datetime.now()}")
+        manage_queue_after_playback(ctx_or_interaction, entry)
 
 def ensure_queue_exists(server_id):
     queue_manager.ensure_queue_exists(server_id)
@@ -544,6 +565,31 @@ async def update_all_now_playing_messages(ctx_or_interaction, entry):
             logging.error(f"Error updating view for message {message_id}: {e}")
             print(f"Error updating view for message {message_id}: {e}")
 
+async def handle_playback_exception(ctx_or_interaction, entry, e):
+    logging.error(f"Exception in play_audio: {e}")
+    if isinstance(ctx_or_interaction, discord.Interaction):
+        try:
+            if not ctx_or_interaction.response.is_done():
+                await ctx_or_interaction.followup.send(f"An error occurred: {e}")
+        except NotFound as e:
+            logging.error(f"Webhook not found: {e}")
+            await ctx_or_interaction.channel.send(f"An error occurred: {e}")
+    else:
+        await ctx_or_interaction.send(f"An error occurred: {e}")
+
+    await update_all_now_playing_messages(ctx_or_interaction, entry)
+
+
+async def send_now_playing_message(ctx_or_interaction, entry):
+    if isinstance(ctx_or_interaction, discord.Interaction):
+        try:
+            if not ctx_or_interaction.response.is_done():
+                await ctx_or_interaction.followup.send(f"Now playing: {entry.title}")
+        except NotFound as e:
+            logging.error(f"Webhook not found: {e}")
+            await ctx_or_interaction.channel.send(f"Now playing: {entry.title}")
+
+
 async def send_now_playing(ctx_or_interaction, entry, paused=False):
     logging.debug(f"Sending now playing message for: {entry.title}")
     print(f"Sending now playing message for: {entry.title}")
@@ -584,20 +630,20 @@ async def schedule_progress_bar_update(ctx_or_interaction, message, entry):
     asyncio.create_task(update_progress_bar(ctx_or_interaction, message, entry))
 
 def create_progress_bar(progress, duration):
-    progress_bar = "[" + "=" * int(progress * 20) + " " * (20 - int(progress * 20)) + "]"
+    total_blocks = 20
+    filled_blocks = int(progress * total_blocks)
+    progress_bar = "[" + "=" * filled_blocks + " " * (total_blocks - filled_blocks) + "]"
     elapsed_str = str(timedelta(seconds=int(progress * duration)))
     duration_str = str(timedelta(seconds=duration))
     return progress_bar, elapsed_str, duration_str
 
 async def update_progress_bar(interaction, message, entry):
     logging.debug(f"Updating progress bar for: {entry.title}")
-    print(f"Updating progress bar for: {entry.title}")
     duration = entry.duration if hasattr(entry, 'duration') else 300
 
     while True:
         if not is_entry_currently_playing(entry):
-            logging.info(f"Stopping progress update for {entry.title} as it is no longer the currently playing entry.")
-            print(f"Stopping progress update for {entry.title} as it is no longer the currently playing entry.")
+            logging.info(f"Stopping progress update for {entry.title}")
             break
 
         if not is_playback_active(interaction):
@@ -605,8 +651,7 @@ async def update_progress_bar(interaction, message, entry):
             break
 
         await refresh_progress_bar(interaction, message, entry, duration)
-        await check_for_next_entry_refresh(interaction, entry, duration)
-        await asyncio.sleep(1)
+        await asyncio.sleep(1)  # Update less frequently to reduce load
 
 def is_entry_currently_playing(entry):
     return queue_manager.currently_playing == entry
@@ -807,6 +852,7 @@ class ButtonView(discord.ui.View):
         self.entry = entry
         self.current_user = current_user
 
+        # Initialize buttons with guild information if necessary
         self.pause_button = Button(label="⏸️ Pause", style=discord.ButtonStyle.primary, custom_id=f"pause-{uuid.uuid4()}")
         self.resume_button = Button(label="▶️ Resume", style=discord.ButtonStyle.primary, custom_id=f"resume-{uuid.uuid4()}")
         self.stop_button = Button(label="⏹️ Stop", style=discord.ButtonStyle.danger, custom_id=f"stop-{uuid.uuid4()}")
@@ -880,6 +926,7 @@ class ButtonView(discord.ui.View):
         self.add_item(self.lyrics_button)
 
         logging.debug(f"Checking guild attribute for entry: {self.entry.title}")
+        print(f"Checking guild attribute for entry: {self.entry.title} with guild: {self.entry.guild}")
 
         if self.entry.guild:
             server_id = str(self.entry.guild.id)
@@ -898,6 +945,7 @@ class ButtonView(discord.ui.View):
                 self.add_item(self.move_to_bottom_button)
 
         self.loop_button.label = "🔁 Looped" if queue_manager.loop else "🔁 Loop"
+        self.loop_button.style = discord.ButtonStyle.primary if queue_manager.loop else discord.ButtonStyle.secondary
         self.add_item(self.loop_button)
 
     async def refresh_view(self, interaction):
@@ -922,11 +970,13 @@ class ButtonView(discord.ui.View):
 
     async def loop_button_callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
+        # await interaction.response.defer()  # Defer the response to get more time
         logging.debug("Loop button callback triggered")
-        # server_id = str(interaction.guild.id)
+
         if queue_manager.currently_playing:
             queue_manager.loop = not queue_manager.loop
             self.loop_button.label = "🔁 Looped" if queue_manager.loop else "🔁 Loop"
+            self.loop_button.style = discord.ButtonStyle.primary if queue_manager.loop else discord.ButtonStyle.secondary
             await interaction.response.send_message(f"Looping {'enabled' if queue_manager.loop else 'disabled'}.")
             logging.info(f"Looping {'enabled' if queue_manager.loop else 'disabled'} for {queue_manager.currently_playing.title}")
             await self.refresh_view(interaction)
@@ -1029,7 +1079,6 @@ class ButtonView(discord.ui.View):
             await asyncio.sleep(0.5)
             await play_audio(interaction, current_entry)
 
-
     async def shuffle_button_callback(self, interaction: discord.Interaction):
         await interaction.response.defer()  # Defer the response
         server_id = str(interaction.guild.id)
@@ -1057,7 +1106,6 @@ class ButtonView(discord.ui.View):
         
         if first_entry_before_shuffle or any(vc.is_paused() for vc in interaction.guild.voice_clients):
             await send_now_playing(interaction, first_entry_before_shuffle)
-
 
     async def list_queue_button_callback(self, interaction: discord.Interaction):
         await interaction.response.defer()  # Defer the response
