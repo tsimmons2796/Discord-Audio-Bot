@@ -25,7 +25,7 @@ class PlaybackManager:
             self.queue_manager.ensure_queue_exists(server_id)
 
             await self.refresh_url_if_needed(entry)
-            entry.guild = ctx_or_interaction.guild  # Ensure guild is set
+            entry.guild_id = str(ctx_or_interaction.guild.id)  # Ensure guild ID is set
             if entry.duration == 0:
                 await self.update_entry_duration(entry)
 
@@ -66,7 +66,6 @@ class PlaybackManager:
             self.queue_manager.stop_is_triggered = False
             if error:
                 logging.error(f"Error playing {entry.title}: {error}")
-                print(f"Error playing {entry.title}: {error}")
                 bot_client = ctx_or_interaction.client if isinstance(ctx_or_interaction, Interaction) else ctx_or_interaction.bot
                 asyncio.run_coroutine_threadsafe(ctx_or_interaction.channel.send("Error occurred during playback."), bot_client.loop).result()
             else:
@@ -74,10 +73,11 @@ class PlaybackManager:
                 print(f"Finished playing {entry.title} at {datetime.now()}")
                 self.manage_queue_after_playback(ctx_or_interaction, entry)
         return after_playing_callback
-    
+
     def manage_queue_after_playback(self, ctx_or_interaction, entry):
         if not self.queue_manager.is_restarting and not self.queue_manager.has_been_shuffled and not self.queue_manager.loop:
             queue = self.queue_manager.get_queue(str(ctx_or_interaction.guild.id))
+            logging.debug(f"Queue before managing playback: {[e.title for e in queue]}")
             if entry in queue:
                 if entry.has_been_arranged and entry.has_been_played_after_arranged:
                     entry.has_been_arranged = False
@@ -87,6 +87,7 @@ class PlaybackManager:
                 elif entry.has_been_arranged and not entry.has_been_played_after_arranged:
                     entry.has_been_played_after_arranged = True
                 self.queue_manager.save_queues()
+            logging.debug(f"Queue after managing playback: {[e.title for e in queue]}")
         if self.queue_manager.loop:
             logging.info(f"Looping {entry.title}")
             print(f"Looping {entry.title}")

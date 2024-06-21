@@ -98,11 +98,11 @@ class ButtonView(View):
         self.add_item(self.favorite_button)
         self.add_item(self.lyrics_button)
 
-        logging.debug(f"Checking guild attribute for entry: {self.entry.title}")
-        print(f"Checking guild attribute for entry: {self.entry.title} with guild: {self.entry.guild}")
+        logging.debug(f"Checking guild_id attribute for entry: {self.entry.title}")
+        print(f"Checking guild_id attribute for entry: {self.entry.title} with guild_id: {self.entry.guild_id}")
 
-        if self.entry.guild:
-            server_id = str(self.entry.guild.id)
+        if self.entry.guild_id:
+            server_id = str(self.entry.guild_id)
             queue = queue_manager.get_queue(server_id)
             entry_index = queue.index(self.entry) if self.entry in queue else -1
 
@@ -124,11 +124,12 @@ class ButtonView(View):
     async def refresh_all_views(self):
         for message_id in self.bot.now_playing_messages:
             try:
-                channel = self.bot.get_channel(self.entry.guild.id)  # Assuming the channel ID is the same as the guild ID for simplicity
+                channel = self.bot.get_channel(self.entry.guild_id)  # Assuming the channel ID is the same as the guild ID for simplicity
                 message = await channel.fetch_message(message_id)
                 await message.edit(view=self)
             except Exception as e:
                 logging.error(f"Error refreshing view for message {message_id}: {e}")
+
     async def refresh_view(self, interaction: Interaction):
         self.update_buttons()
         await interaction.message.edit(view=self)

@@ -18,7 +18,9 @@ class AudioBot(commands.Bot):
 
     async def setup_hook(self):
         logging.debug("Setting up hook for AudioBot")
-        dummy_entry = QueueEntry(video_url='', best_audio_url='', title='dummy', is_playlist=False, guild=None)
+        # Dummy entry to ensure the QueueEntry class is initialized correctly
+        dummy_entry = QueueEntry(video_url='', best_audio_url='', title='dummy', is_playlist=False, guild_id=None)
+        print("Setup hook executed")
         self.add_view(ButtonView(self, dummy_entry))
         await setup_commands(self)
         await self.tree.sync()
