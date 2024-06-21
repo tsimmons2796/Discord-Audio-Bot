@@ -102,7 +102,7 @@ class ButtonView(View):
         print(f"Checking guild attribute for entry: {self.entry.title} with guild: {self.entry.guild}")
 
         if self.entry.guild:
-            server_id = str(self.entry.guild)
+            server_id = str(self.entry.guild.id)
             queue = queue_manager.get_queue(server_id)
             entry_index = queue.index(self.entry) if self.entry in queue else -1
 
@@ -129,8 +129,7 @@ class ButtonView(View):
                 await message.edit(view=self)
             except Exception as e:
                 logging.error(f"Error refreshing view for message {message_id}: {e}")
-
-    async def refresh_view(self, interaction):
+    async def refresh_view(self, interaction: Interaction):
         self.update_buttons()
         await interaction.message.edit(view=self)
 
