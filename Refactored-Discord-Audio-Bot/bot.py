@@ -18,7 +18,6 @@ class AudioBot(commands.Bot):
 
     async def setup_hook(self):
         logging.debug("Setting up hook for AudioBot")
-        # Dummy entry to ensure the QueueEntry class is initialized correctly
         dummy_entry = QueueEntry(video_url='', best_audio_url='', title='dummy', is_playlist=False, guild_id=None)
         print("Setup hook executed")
         self.add_view(ButtonView(self, dummy_entry))
@@ -33,9 +32,14 @@ class AudioBot(commands.Bot):
         view = self.message_views.get(message.id)
         if view:
             await message.edit(view=view)
-        
+
         # Check for mp3_list command trigger
         if message.content.startswith(".mp3_list"):
+            ctx = await self.get_context(message)
+            await self.invoke(ctx)
+
+        # Check for mp3_list_next command trigger
+        if message.content.startswith(".mp3_list_next"):
             ctx = await self.get_context(message)
             await self.invoke(ctx)
 
@@ -55,5 +59,5 @@ if __name__ == '__main__':
     intents.voice_states = True
     intents.message_content = True
 
-    bot = AudioBot(command_prefix="!", intents=intents)
+    bot = AudioBot(command_prefix=".", intents=intents)
     bot.run(DISCORD_TOKEN)

@@ -26,9 +26,52 @@ genius = Genius(GENIUS_API_TOKEN)
 
 executor = ThreadPoolExecutor(max_workers=1)
 
+UNWANTED_PATTERNS = [
+    r'\(Official Video\)', 
+    r'\(Official Audio\)', 
+    r'\(Audio\)',
+    r'\(Official Lyric Video\)', 
+    r'\(Visualizer\)', 
+    r'\(audio only\)', 
+    r'\(Official Music Video\)', 
+    r'\[Official Visualizer\]',
+    r'\(Lyrics\)',
+    r'\(Lyric Video\)',
+    r'\[Lyrics\]',
+    r'\(HD\)',
+    r'\[HD\]',
+    r'\[ Official Music Video \]',
+    r'\[ Official Visualizer \]',
+    r'\[ Visualizer \]',
+    # Add more patterns as needed
+]
+
 def sanitize_title(title: str) -> str:
+    """
+    Sanitize the given title by removing unwanted characters and patterns.
+
+    Args:
+        title (str): The original title of the song.
+
+    Returns:
+        str: The sanitized title.
+    """
+    logging.debug(f"Sanitizing title: {title}")
+    print(f"Sanitizing title: {title}")
+    # Define a pattern to match characters that are not allowed in file names.
     illegal_characters_pattern = r'[<>:"/\\|?*]'
+    
+    # Remove illegal characters from the title.
     sanitized_title = re.sub(illegal_characters_pattern, '', title, flags=re.IGNORECASE)
+    logging.debug(f"Title after removing illegal characters: {sanitized_title}")
+    print(f"Title after removing illegal characters: {sanitized_title}")
+    
+    # Remove unwanted patterns defined in UNWANTED_PATTERNS from the title.
+    for unwanted_pattern in UNWANTED_PATTERNS:
+        sanitized_title = re.sub(unwanted_pattern, '', sanitized_title, flags=re.IGNORECASE).strip()
+        logging.debug(f"Title after removing pattern '{unwanted_pattern}': {sanitized_title}")
+        print(f"Title after removing pattern '{unwanted_pattern}': {sanitized_title}")
+    
     return sanitized_title
 
 def sanitize_filename(filename: str) -> str:
@@ -37,17 +80,23 @@ def sanitize_filename(filename: str) -> str:
     return re.sub(r'[^a-zA-Z0-9_\-.]', '_', filename)
 
 async def download_file(url: str, dest_folder: str) -> str:
+    logging.debug(f"Downloading file from URL: {url}")
+    print(f"Downloading file from URL: {url}")
     os.makedirs(dest_folder, exist_ok=True)
-    filename = os.path.basename(url)
+    filename = sanitize_filename(os.path.basename(url))
     file_path = os.path.join(dest_folder, filename)
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             if response.status == 200:
                 with open(file_path, 'wb') as f:
                     f.write(await response.read())
+                logging.info(f"Downloaded file: {file_path}")
+                print(f"Downloaded file: {file_path}")
                 return file_path
             else:
-                raise Exception(f"Failed to download file from {url}")
+                logging.error(f"Failed to download file: {url}")
+                print(f"Failed to download file: {url}")
+                return None
 
 def extract_mp3_metadata(file_path: str) -> dict:
     audio = MP3(file_path)
@@ -124,12 +173,13 @@ async def finalize_progress_update(interaction, message, entry, duration, button
     embed = update_embed_fields(message.embeds[0], entry, progress_bar, elapsed_str, duration_str)
     view = button_view(interaction.client, entry, paused=False, current_user=interaction.user)
     await message.edit(embed=embed, view=view)
-    
+
 async def update_progress_bar(interaction, message, entry, button_view, queue_manager):
     logging.debug(f"Updating progress bar for: {entry.title}")
     duration = entry.duration if hasattr(entry, 'duration') else 300
 
-    while True:
+    while not queue_manager.is_paused:
+        print(f'{is_playback_active(interaction)}  is playback active --- checking for opposite')
         if not is_entry_currently_playing(entry, queue_manager):
             logging.info(f"Stopping progress update for {entry.title}")
             break
@@ -139,7 +189,7 @@ async def update_progress_bar(interaction, message, entry, button_view, queue_ma
             break
 
         await refresh_progress_bar(interaction, message, entry, duration, button_view)
-        await asyncio.sleep(1)  # Update less frequently to reduce load
+        await asyncio.sleep(2)  # Update less frequently to reduce load
         
 def create_progress_bar(progress, duration):
     total_blocks = 20
@@ -148,7 +198,7 @@ def create_progress_bar(progress, duration):
     elapsed_str = str(timedelta(seconds=int(progress * duration)))
     duration_str = str(timedelta(seconds=duration))
     return progress_bar, elapsed_str, duration_str
-        
+
 async def refresh_progress_bar(interaction, message, entry, duration, button_view):
     elapsed = calculate_elapsed_time(entry, duration)
     progress_bar, elapsed_str, duration_str = create_progress_bar(elapsed / duration, duration)
@@ -169,17 +219,6 @@ def update_embed_fields(embed, entry, progress_bar, elapsed_str, duration_str):
     embed.set_field_at(0, name="Favorited by", value=favorited_by, inline=False)
     embed.set_field_at(1, name="Progress", value=f"{progress_bar} {elapsed_str} / {duration_str}", inline=False)
     return embed
-
-async def send_now_playing_message(ctx_or_interaction, entry):
-    if isinstance(ctx_or_interaction, Interaction):
-        try:
-            if not ctx_or_interaction.response.is_done():
-                await ctx_or_interaction.followup.send(f"Now playing: {entry.title}")
-        except NotFound as e:
-            logging.error(f"Webhook not found: {e}")
-            await ctx_or_interaction.channel.send(f"Now playing: {entry.title}")
-    # else:
-    #     await ctx_or_interaction.send(f"Now playing: {entry.title}")
 
 async def get_lyrics(query: str) -> str:
     def process_lyrics(lyrics: str) -> str:

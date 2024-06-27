@@ -7,7 +7,7 @@ from utils import sanitize_title
 logging.basicConfig(level=logging.DEBUG, filename='queue_manager.log', format='%(asctime)s:%(levelname)s:%(message)s')
 
 class QueueEntry:
-    def __init__(self, video_url: str, best_audio_url: str, title: str, is_playlist: bool, thumbnail: str = '', playlist_index: Optional[int] = None, duration: int = 0, is_favorited: bool = False, favorited_by: Optional[List[Dict[str, str]]] = None, has_been_arranged: bool = False, has_been_played_after_arranged: bool = False, timestamp: Optional[str] = None, paused_duration: Optional[float] = 0.0, guild_id: Optional[str] = None):
+    def __init__(self, video_url: str, best_audio_url: str, title: str, is_playlist: bool, thumbnail: str = '', playlist_index: Optional[int] = None, duration: int = 0, is_favorited: bool = False, favorited_by: Optional[List[Dict[str, str]]] = None, has_been_arranged: bool = False, has_been_played_after_arranged: bool = False, timestamp: Optional[str] = None, paused_duration: Optional[float] = 0.0, guild_id: Optional[str] = None, pause_start_time: Optional[datetime] = None, start_time: Optional[datetime] = None):
         logging.debug(f"Creating QueueEntry: {title}, URL: {video_url}")
         print(f"Creating QueueEntry: {title}, URL: {video_url}, Guild ID: {guild_id}")
         self.video_url = video_url
@@ -22,8 +22,8 @@ class QueueEntry:
         self.has_been_arranged = has_been_arranged
         self.has_been_played_after_arranged = has_been_played_after_arranged
         self.timestamp = timestamp or datetime.now().isoformat()
-        self.pause_start_time = None
-        self.start_time = datetime.now()
+        self.pause_start_time = pause_start_time
+        self.start_time = start_time or datetime.now()
         self.paused_duration = timedelta(seconds=paused_duration) if isinstance(paused_duration, (int, float)) else timedelta(seconds=0.0)
         self.guild_id = guild_id
 
@@ -31,12 +31,14 @@ class QueueEntry:
         data = self.__dict__.copy()
         data['start_time'] = self.start_time.isoformat() if self.start_time else None
         data['paused_duration'] = self.paused_duration.total_seconds()
+        data['pause_start_time'] = self.pause_start_time.isoformat() if self.pause_start_time else None
         return data
 
     @classmethod
     def from_dict(cls, data):
         data['start_time'] = datetime.fromisoformat(data.get('start_time')) if data.get('start_time') else None
         data['paused_duration'] = timedelta(seconds=data.get('paused_duration', 0))
+        data['pause_start_time'] = datetime.fromisoformat(data.get('pause_start_time')) if data.get('pause_start_time') else None
         return cls(**data)
 
 class BotQueue:
@@ -45,6 +47,7 @@ class BotQueue:
         print("Initializing BotQueue")
         self.queues = self.load_queues()
         self.currently_playing = None
+        self.is_paused = False
         self.queue_file = 'queues.json'
         self.loop = False
         self.stop_is_triggered = False

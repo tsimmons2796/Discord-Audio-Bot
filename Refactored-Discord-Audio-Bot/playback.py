@@ -30,6 +30,8 @@ class PlaybackManager:
                 await self.update_entry_duration(entry)
 
             self.queue_manager.set_currently_playing(entry)
+            self.queue_manager.is_paused = False
+
             self.queue_manager.save_queues()
             entry.start_time = datetime.now()
             entry.paused_duration = timedelta(0)
@@ -41,13 +43,10 @@ class PlaybackManager:
                 self.handle_playback_end(ctx_or_interaction, entry, error)
 
             await self.start_playback(ctx_or_interaction, entry, after_playing_callback)
-
             logging.info("Calling send_now_playing")
             print("Calling send_now_playing")
-
             logging.info("send_now_playing completed")
             print("send_now_playing completed")
-
             # Schedule a halfway point queue refresh
             halfway_duration = entry.duration / 2
             asyncio.create_task(self.schedule_halfway_queue_refresh(server_id, halfway_duration))
@@ -135,6 +134,8 @@ class PlaybackManager:
             )
             if not voice_client.is_playing():
                 voice_client.play(audio_source, after=after_callback)
+                print(f'setting currently playing entry - {entry.title} = entry.title')
+                self.queue_manager.set_currently_playing(entry)
                 asyncio.create_task(send_now_playing_message(ctx_or_interaction, entry))
                 self.queue_manager.has_been_shuffled = False
                 logging.info(f"Playback started for {entry.title} at {datetime.now()}")

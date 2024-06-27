@@ -559,8 +559,10 @@ class MusicCommands(commands.Cog):
     @app_commands.command(name='pause', description='Pause the currently playing track.')
     async def pause(self, interaction: Interaction):
         logging.debug("Pause command executed")
+        server_id = str(interaction.guild.id)
         if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
             interaction.guild.voice_client.pause()
+            queue_manager.is_paused = True
             message = await interaction.original_message()
             view = message.components[0].view
             view.paused = True
@@ -573,8 +575,10 @@ class MusicCommands(commands.Cog):
     @app_commands.command(name='resume', description='Resume playback if it is paused.')
     async def resume(self, interaction: Interaction):
         logging.debug("Resume command executed")
+        server_id = str(interaction.guild.id)
         if interaction.guild.voice_client and interaction.guild.voice_client.is_paused():
             interaction.guild.voice_client.resume()
+            queue_manager.is_paused = False
             message = await interaction.original_message()
             view = message.components[0].view
             view.paused = False
@@ -669,7 +673,7 @@ class MusicCommands(commands.Cog):
             await ctx.send("Please provide a valid URL or attach an MP3 file.")
 
     @commands.command(name='mp3_list')
-    async def mp3_list(self, ctx, url: str = None):
+    async def mp3_list(self, ctx):
         logging.debug("mp3_list command invoked")
         print("mp3_list command invoked")
 

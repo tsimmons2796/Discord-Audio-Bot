@@ -11,21 +11,21 @@ from discord import ButtonStyle, Embed, File, Interaction
 from discord.ui import Button, View
 from queue_manager import queue_manager, QueueEntry
 from utils import get_lyrics, create_now_playing_embed, schedule_progress_bar_update
-# from playback import PlaybackManager
 
 logging.basicConfig(level=logging.DEBUG, filename='views.log', format='%(asctime)s:%(levelname)s:%(message)s')
 
 class ButtonView(View):
     def __init__(self, bot, entry: QueueEntry, paused: bool = False, current_user: Optional[discord.User] = None):
-        logging.debug(f"Initializing ButtonView for: {entry.title}")
+        logging.debug(f"Initializing ButtonView for: {entry.title} with paused state: {paused}")
+        print(f"Initializing ButtonView for: {entry.title} with paused state: {paused}")
         super().__init__(timeout=None)
         self.bot = bot
         self.paused = paused
         self.entry = entry
         self.current_user = current_user
-        # Avoid circular import by importing PlaybackManager within the method where it's used
         from playback import PlaybackManager
         self.playback_manager = PlaybackManager(queue_manager)
+        self.progress_update_task = None  # Track the progress update task
 
         self.pause_button = Button(label="⏸️ Pause", style=ButtonStyle.primary, custom_id=f"pause-{uuid.uuid4()}")
         self.resume_button = Button(label="▶️ Resume", style=ButtonStyle.primary, custom_id=f"resume-{uuid.uuid4()}")
@@ -68,7 +68,9 @@ class ButtonView(View):
         self.lyrics_button.callback = self.lyrics_button_callback
 
         self.update_buttons()
-    
+        # Start the progress update task when the view is initialized
+        asyncio.create_task(self.start_progress_update_task(None, self.entry))
+
     @staticmethod
     async def send_now_playing_for_buttons(interaction: Interaction, entry: QueueEntry):
         embed = create_now_playing_embed(entry)
@@ -83,6 +85,7 @@ class ButtonView(View):
 
     def update_buttons(self):
         self.clear_items()
+        logging.debug(f"Updating buttons with paused state: {self.paused}")
         if self.paused:
             self.add_item(self.resume_button)
         else:
@@ -97,7 +100,6 @@ class ButtonView(View):
         self.add_item(self.previous_button)
         self.add_item(self.favorite_button)
         self.add_item(self.lyrics_button)
-
         logging.debug(f"Checking guild_id attribute for entry: {self.entry.title}")
         print(f"Checking guild_id attribute for entry: {self.entry.title} with guild_id: {self.entry.guild_id}")
 
@@ -105,7 +107,6 @@ class ButtonView(View):
             server_id = str(self.entry.guild_id)
             queue = queue_manager.get_queue(server_id)
             entry_index = queue.index(self.entry) if self.entry in queue else -1
-
             logging.debug(f"Entry index: {entry_index}, Queue length: {len(queue)}")
 
             if entry_index > 0:
@@ -124,7 +125,7 @@ class ButtonView(View):
     async def refresh_all_views(self):
         for message_id in self.bot.now_playing_messages:
             try:
-                channel = self.bot.get_channel(self.entry.guild_id)  # Assuming the channel ID is the same as the guild ID for simplicity
+                channel = self.bot.get_channel(self.entry.guild_id)
                 message = await channel.fetch_message(message_id)
                 await message.edit(view=self)
             except Exception as e:
@@ -133,7 +134,7 @@ class ButtonView(View):
     async def refresh_view(self, interaction: Interaction):
         self.update_buttons()
         await interaction.message.edit(view=self)
-
+        
     async def lyrics_button_callback(self, interaction: Interaction):
         logging.debug(f"Lyrics button clicked for: {self.entry.title}")
         await interaction.response.defer(ephemeral=True)
@@ -163,12 +164,12 @@ class ButtonView(View):
             await self.refresh_view(interaction)
         else:
             await interaction.followup.send("No track is currently playing.", ephemeral=True)
-
+        
     async def favorite_button_callback(self, interaction: Interaction):
         logging.debug("Favorite button callback triggered")
-        await interaction.response.defer(ephemeral=True)  # Defer the response to get more time
+        await interaction.response.defer(ephemeral=True)
         user_id = interaction.user.id
-        user_name = interaction.user.display_name  # Get the display name (nickname or username)
+        user_name = interaction.user.display_name
         if user_id in [user['id'] for user in self.entry.favorited_by]:
             self.entry.favorited_by = [user for user in self.entry.favorited_by if user['id'] != user_id]
             self.entry.is_favorited = False
@@ -182,32 +183,52 @@ class ButtonView(View):
 
         queue_manager.save_queues()
         await self.update_now_playing(interaction)
-        await self.refresh_all_views()  # Update all instances of "Now Playing"
+        await self.refresh_all_views()
         await interaction.followup.send(f"{'Added to' if self.entry.is_favorited else 'Removed from'} favorites.", ephemeral=True)
-
+        
     async def update_now_playing(self, interaction: Interaction):
         embed = interaction.message.embeds[0]
         favorited_by = ', '.join([user['name'] for user in self.entry.favorited_by]) if self.entry.favorited_by else "No one"
         embed.set_field_at(0, name="Favorited by", value=favorited_by, inline=False)
         await interaction.message.edit(embed=embed, view=self)
+    
 
     async def pause_button_callback(self, interaction: Interaction):
         await interaction.response.defer(ephemeral=True)
         if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
             interaction.guild.voice_client.pause()
+            queue_manager.is_paused = True
+            self.entry.pause_start_time = datetime.now()
             self.paused = True
+            logging.debug(f"Pause button clicked. Setting paused to {self.paused}")
             self.update_buttons()
             await interaction.message.edit(view=self)
             await interaction.followup.send('Playback paused.', ephemeral=True)
+            # Stop the progress update task
+            if self.progress_update_task:
+                self.progress_update_task.cancel()
+                self.progress_update_task = None
 
     async def resume_button_callback(self, interaction: Interaction):
         await interaction.response.defer(ephemeral=True)
         if interaction.guild.voice_client and interaction.guild.voice_client.is_paused():
             interaction.guild.voice_client.resume()
+            queue_manager.is_paused = False
+            self.entry.paused_duration += datetime.now() - self.entry.pause_start_time
+            self.entry.pause_start_time = None
             self.paused = False
+            logging.debug(f"Resume button clicked. Setting paused to {self.paused}")
             self.update_buttons()
             await interaction.message.edit(view=self)
             await interaction.followup.send('Playback resumed.', ephemeral=True)
+            await self.start_progress_update_task(interaction, self.entry)  # Restart the progress update task
+
+    async def start_progress_update_task(self, interaction, entry):
+        if self.progress_update_task is None:
+            logging.debug(f"Starting progress update task with paused state: {queue_manager.is_paused}")
+            print(f"Starting progress update task with paused state: {queue_manager.is_paused}")
+            self.progress_update_task = asyncio.create_task(schedule_progress_bar_update(
+                interaction, interaction.message, entry, ButtonView, queue_manager))
 
     async def stop_button_callback(self, interaction: Interaction):
         await interaction.response.defer()  # Defer the response
@@ -275,7 +296,7 @@ class ButtonView(View):
         for chunk in chunks:
             await interaction.channel.send(chunk)
         
-        if first_entry_before_shuffle or any(vc.is_paused() for vc in interaction.guild.voice_clients):
+        if first_entry_before_shuffle or any(vc.is_paused() for vc in interaction.guild.voice_client):
             await self.send_now_playing_for_buttons(interaction, first_entry_before_shuffle)
 
     async def list_queue_button_callback(self, interaction: Interaction):
