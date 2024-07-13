@@ -2,6 +2,8 @@ import logging
 from discord.ext import commands
 from config import DISCORD_TOKEN
 from commands import setup_commands
+# from voice_commands import setup_voice_commands
+# from audio_commands import register_commands
 from queue_manager import BotQueue, QueueEntry
 from views import ButtonView
 from discord import Intents
@@ -11,7 +13,7 @@ logging.basicConfig(level=logging.DEBUG, filename='bot.log', format='%(asctime)s
 class AudioBot(commands.Bot):
     def __init__(self, command_prefix, intents):
         logging.debug("Initializing AudioBot")
-        super().__init__(command_prefix, intents=intents)
+        super().__init__(command_prefix, intents=intents, help_command=None)
         self.queue_manager = BotQueue()
         self.message_views = {}
         self.now_playing_messages = []
@@ -22,7 +24,10 @@ class AudioBot(commands.Bot):
         print("Setup hook executed")
         self.add_view(ButtonView(self, dummy_entry))
         await setup_commands(self)
+        # await setup_voice_commands(self)
+        # register_commands(self)
         await self.tree.sync()
+        print("Setup hook completed")
 
     async def on_ready(self):
         logging.info(f'{self.user} is now connected and ready.')
@@ -37,16 +42,19 @@ class AudioBot(commands.Bot):
         if message.content.startswith(".mp3_list"):
             ctx = await self.get_context(message)
             await self.invoke(ctx)
+            print("mp3_list command triggered")
 
         # Check for mp3_list_next command trigger
         if message.content.startswith(".mp3_list_next"):
             ctx = await self.get_context(message)
             await self.invoke(ctx)
+            print("mp3_list_next command triggered")
 
-        # Check for listen command trigger
-        if message.content.startswith("!listen"):
+        # Check for voice_listen command trigger
+        if message.content.startswith(".listen"):
             ctx = await self.get_context(message)
             await self.invoke(ctx)
+            print("voice_listen command triggered")
 
     def add_now_playing_message(self, message_id):
         self.now_playing_messages.append(message_id)

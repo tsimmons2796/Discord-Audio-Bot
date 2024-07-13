@@ -45,8 +45,6 @@ class PlaybackManager:
             await self.start_playback(ctx_or_interaction, entry, after_playing_callback)
             logging.info("Calling send_now_playing")
             print("Calling send_now_playing")
-            logging.info("send_now_playing completed")
-            print("send_now_playing completed")
             # Schedule a halfway point queue refresh
             halfway_duration = entry.duration / 2
             asyncio.create_task(self.schedule_halfway_queue_refresh(server_id, halfway_duration))
@@ -58,7 +56,6 @@ class PlaybackManager:
         self.queue_manager.get_queue(server_id)
         logging.debug(f"Queue refreshed at halfway point for server {server_id}")
         print(f"Queue refreshed at halfway point for server {server_id}")
-    
     
     def after_playing(self, ctx_or_interaction, entry):
         def after_playing_callback(error):
@@ -226,7 +223,7 @@ class PlaybackManager:
             logging.warning(f"Skipping unavailable video: {str(e)}")
             return None
         
-    def create_queue_entry(video_info, index):
+    def create_queue_entry(self, video_info, index):
         logging.debug(f"Creating QueueEntry from video_info: {video_info.get('title', 'Unknown title')}")
         print(f"Creating QueueEntry from video_info: {video_info.get('title', 'Unknown title')}")
         return QueueEntry(
@@ -258,7 +255,7 @@ class PlaybackManager:
             await self.play_audio(interaction, first_entry)
         else:
             self.queue_manager.add_to_queue(server_id, first_entry)
-        
+
         await interaction.followup.send(f"Added to queue: {first_entry.title}")
 
         if not self.queue_manager.currently_playing:
@@ -300,22 +297,22 @@ class PlaybackManager:
         logging.debug(response)
         print(response)
         await interaction.followup.send(response)
-
-    async def process_single_video_or_mp3(self, url, interaction, QueueEntry):
-        info = await self.fetch_info(url)
-        if not info:
-            await interaction.followup.send("Failed to fetch information from the provided URL.")
-            return None
-
-        entry = QueueEntry(
-            video_url=info['webpage_url'],
-            best_audio_url=info['best_audio_url'],
-            title=info['title'],
-            is_playlist=False,
-            thumbnail=info['thumbnail'],
-            duration=info['duration']
-        )
-        return entry
+    async def process_single_video_or_mp3(self, url, interaction):
+        if url.lower().endswith('.mp3'):
+            logging.debug(f"Processing MP3 file: {url}")
+            print(f"Processing MP3 file: {url}")
+            return QueueEntry(video_url=url, best_audio_url=url, title=url.split('/')[-1], is_playlist=False)
+        else:
+            video_info = await self.fetch_info(url)
+            if video_info:
+                logging.debug(f"Processing single video: {video_info.get('title', 'Unknown title')}")
+                print(f"Processing single video: {video_info.get('title', 'Unknown title')}")
+                return self.create_queue_entry(video_info, None)
+            else:
+                await interaction.response.send_message("Error retrieving video data.")
+                logging.error("Error retrieving video data.")
+                print("Error retrieving video data.")
+                return None
 
     async def fetch_playlist_length(self, url):
         ydl_opts = {'quiet': True, 'noplaylist': False, 'extract_entries': True, 'ignoreerrors': True}

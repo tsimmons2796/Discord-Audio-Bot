@@ -33,29 +33,9 @@ class MusicCommands(commands.Cog):
 
         if youtube_url:
             if "list=" in youtube_url:
-                playlist_length = await playback_manager.process_play_command(interaction, youtube_url, queue_manager, QueueEntry)
-                for index in range(1, playlist_length + 1):
-                    video_info = await playback_manager.fetch_info(youtube_url, index=index)
-                    if video_info and 'entries' in video_info:
-                        video = video_info['entries'][0] if video_info['entries'] else None
-                        if video:
-                            entry = QueueEntry(
-                                video_url=video['webpage_url'],
-                                best_audio_url=next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), ''),
-                                title=video['title'],
-                                is_playlist=True,
-                                playlist_index=index
-                            )
-                            queue.insert(index, entry)
-                            await interaction.followup.send(f"Added to queue: {entry.title} at position {index + 1}")
-                            queue_manager.save_queues()
-                            if not interaction.guild.voice_client.is_playing():
-                                await playback_manager.play_audio(interaction, entry)
-                    else:
-                        await interaction.followup.send(f"Failed to retrieve video at index {index}")
-                        break
+                await playback_manager.process_play_command(interaction, youtube_url)
             else:
-                entry = await playback_manager.process_single_video_or_mp3(youtube_url, interaction, QueueEntry)
+                entry = await playback_manager.process_single_video_or_mp3(youtube_url, interaction)
                 if entry:
                     queue.insert(1, entry)
                     await interaction.followup.send(f"'{entry.title}' added to the queue at position 2.")
@@ -223,9 +203,9 @@ class MusicCommands(commands.Cog):
 
         if youtube_url:
             if "list=" in youtube_url:
-                await playback_manager.process_play_command(interaction, youtube_url, queue_manager, QueueEntry)
+                await playback_manager.process_play_command(interaction, youtube_url)
             else:
-                entry = await playback_manager.process_single_video_or_mp3(youtube_url, interaction, QueueEntry)
+                entry = await playback_manager.process_single_video_or_mp3(youtube_url, interaction)
                 if entry:
                     if not queue_manager.currently_playing:
                         queue.insert(0, entry)
