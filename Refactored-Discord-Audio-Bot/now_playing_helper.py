@@ -1,8 +1,7 @@
-import logging
 from discord import Interaction, Embed
 from queue_manager import QueueEntry, queue_manager
 from utils import create_now_playing_embed, schedule_progress_bar_update, remove_orphaned_mp3_files
-from views import ButtonView
+from button_view import ButtonView
 
 async def send_now_playing_message(interaction: Interaction, entry: QueueEntry):
     await remove_orphaned_mp3_files(queue_manager)  # Add this line

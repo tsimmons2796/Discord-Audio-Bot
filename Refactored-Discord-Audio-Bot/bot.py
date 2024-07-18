@@ -5,8 +5,8 @@ from commands import setup_commands
 # from voice_commands import setup_voice_commands
 # from audio_commands import register_commands
 from queue_manager import BotQueue, QueueEntry
-from views import ButtonView
-from discord import Intents
+from button_view import ButtonView
+from discord import Intents, PCMVolumeTransformer
 
 logging.basicConfig(level=logging.DEBUG, filename='bot.log', format='%(asctime)s:%(levelname)s:%(message)s')
 
@@ -61,6 +61,14 @@ class AudioBot(commands.Bot):
 
     def clear_now_playing_messages(self):
         self.now_playing_messages.clear()
+
+    async def on_voice_state_update(self, member, before, after):
+        if after.channel is not None:
+            voice_client = self.get_guild(member.guild.id).voice_client
+            if voice_client and voice_client.channel == after.channel:
+                # Ensure volume is set to 50% if not already
+                if voice_client.source and isinstance(voice_client.source, PCMVolumeTransformer):
+                    voice_client.source.volume = 0.5
 
 if __name__ == '__main__':
     intents = Intents.default()

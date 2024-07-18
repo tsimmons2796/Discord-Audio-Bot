@@ -1,13 +1,9 @@
 import logging
 from discord.ext import commands
 from discord import Attachment, Interaction, app_commands
-from queue_manager import QueueEntry, queue_manager
+from queue_manager import queue_manager
 from playback import PlaybackManager
-from utils import download_file, extract_mp3_metadata
-from views import ButtonView
-import asyncio
 from typing import Optional
-import re
 
 from command_functions import (
     process_help,

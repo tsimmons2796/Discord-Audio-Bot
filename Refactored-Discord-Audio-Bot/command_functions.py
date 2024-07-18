@@ -7,9 +7,8 @@ from youtubesearchpython import VideosSearch
 from queue_manager import QueueEntry, queue_manager
 from playback import PlaybackManager
 from utils import download_file, extract_mp3_metadata, sanitize_title, delete_file
-from views import ButtonView
+from button_view import ButtonView
 from typing import Optional
-import re
 
 logging.basicConfig(level=logging.DEBUG, filename='commands.log', format='%(asctime)s:%(levelname)s:%(message)s')
 

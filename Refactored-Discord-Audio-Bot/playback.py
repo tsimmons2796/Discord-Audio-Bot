@@ -1,13 +1,9 @@
 import logging
 import asyncio
-import re
-import aiohttp
 import yt_dlp
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from discord import FFmpegPCMAudio, Interaction, Embed, PCMVolumeTransformer
-from discord.errors import NotFound
-from discord.utils import get
+from discord import FFmpegPCMAudio, Interaction, PCMVolumeTransformer
 from now_playing_helper import send_now_playing_message
 from queue_manager import QueueEntry
 
@@ -129,6 +125,9 @@ class PlaybackManager:
                 entry.best_audio_url,
                 options='-bufsize 65536k -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 2 -vn'
             )
+            # Set volume to 50%
+            audio_source = PCMVolumeTransformer(audio_source, volume=0.75)
+
             if not voice_client.is_playing():
                 voice_client.play(audio_source, after=after_callback)
                 print(f'setting currently playing entry - {entry.title} = entry.title')
