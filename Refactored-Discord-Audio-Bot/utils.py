@@ -112,6 +112,13 @@ def extract_mp3_metadata(file_path: str) -> dict:
         'duration': duration
     }
 
+async def delete_file(file_path: str):
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        logging.info(f"Deleted file: {file_path}")
+    else:
+        logging.warning(f"File not found for deletion: {file_path}")
+
 async def fetch_info(url, index: int = None):
     ydl_opts = {
         'format': 'bestaudio/best',
@@ -269,3 +276,16 @@ async def get_lyrics(query: str) -> str:
         logging.error(f"Error fetching lyrics: {e}")
         print(f"Exception: {e}")
         return "An error occurred while fetching the lyrics."
+    
+async def remove_orphaned_mp3_files(queue_manager, download_folder: str = 'downloaded-mp3s'):
+    """Remove MP3 files that are not in the current queues."""
+    logging.debug("Checking for orphaned MP3 files.")
+    all_entries = [entry for queue in queue_manager.queues.values() for entry in queue]
+    all_mp3_files = {entry.best_audio_url for entry in all_entries if entry.best_audio_url.startswith(download_folder)}
+    
+    for root, _, files in os.walk(download_folder):
+        for file in files:
+            file_path = os.path.join(root, file)
+            if file_path not in all_mp3_files:
+                await delete_file(file_path)
+                logging.info(f"Deleted orphaned MP3 file: {file_path}")
