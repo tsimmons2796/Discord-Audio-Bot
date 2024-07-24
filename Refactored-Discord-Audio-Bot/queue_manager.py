@@ -108,7 +108,7 @@ class BotQueue:
 
     def get_queue(self, server_id: str) -> List[QueueEntry]:
         logging.debug(f"Getting queue for server: {server_id}")
-        print(f"Getting queue for server: {server_id}")
+        # print(f"Getting queue for server: {server_id}")
         if server_id in self.queue_cache:
             return self.queue_cache[server_id]
         else:

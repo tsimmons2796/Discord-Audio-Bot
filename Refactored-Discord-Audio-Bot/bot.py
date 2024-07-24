@@ -21,13 +21,11 @@ class AudioBot(commands.Bot):
     async def setup_hook(self):
         logging.debug("Setting up hook for AudioBot")
         dummy_entry = QueueEntry(video_url='', best_audio_url='', title='dummy', is_playlist=False, guild_id=None)
-        print("Setup hook executed")
         self.add_view(ButtonView(self, dummy_entry))
         await setup_commands(self)
         # await setup_voice_commands(self)
         # register_commands(self)
         await self.tree.sync()
-        print("Setup hook completed")
 
     async def on_ready(self):
         logging.info(f'{self.user} is now connected and ready.')

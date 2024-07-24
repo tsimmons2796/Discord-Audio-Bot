@@ -224,7 +224,7 @@ class PlaybackManager:
         
     def create_queue_entry(self, video_info, index):
         logging.debug(f"Creating QueueEntry from video_info: {video_info.get('title', 'Unknown title')}")
-        print(f"Creating QueueEntry from video_info: {video_info.get('title', 'Unknown title')}")
+        # print(f"Creating QueueEntry from video_info: {video_info.get('title', 'Unknown title')}")
         return QueueEntry(
             video_url=video_info.get('webpage_url', ''),
             best_audio_url=video_info.get('best_audio_url', ''),

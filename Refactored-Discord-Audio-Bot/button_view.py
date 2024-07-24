@@ -32,7 +32,7 @@ logging.basicConfig(level=logging.DEBUG, filename='views.log', format='%(asctime
 class ButtonView(View):
     def __init__(self, bot, entry: QueueEntry, paused: bool = False, current_user: Optional[User] = None):
         logging.debug(f"Initializing ButtonView for: {entry.title} with paused state: {paused}")
-        print(f"Initializing ButtonView for: {entry.title} with paused state: {paused}")
+        # print(f"Initializing ButtonView for: {entry.title} with paused state: {paused}")
         super().__init__(timeout=None)
         self.bot = bot
         self.paused = paused
@@ -116,7 +116,7 @@ class ButtonView(View):
         self.add_item(self.favorite_button)
         self.add_item(self.lyrics_button)
         logging.debug(f"Checking guild_id attribute for entry: {self.entry.title}")
-        print(f"Checking guild_id attribute for entry: {self.entry.title} with guild_id: {self.entry.guild_id}")
+        # print(f"Checking guild_id attribute for entry: {self.entry.title} with guild_id: {self.entry.guild_id}")
 
         if self.entry.guild_id:
             server_id = str(self.entry.guild_id)
@@ -201,6 +201,6 @@ class ButtonView(View):
     async def start_progress_update_task(self, interaction, entry):
         if self.progress_update_task is None:
             logging.debug(f"Starting progress update task with paused state: {queue_manager.is_paused}")
-            print(f"Starting progress update task with paused state: {queue_manager.is_paused}")
+            # print(f"Starting progress update task with paused state: {queue_manager.is_paused}")
             self.progress_update_task = asyncio.create_task(schedule_progress_bar_update(
                 interaction, interaction.message, entry, ButtonView, queue_manager))
