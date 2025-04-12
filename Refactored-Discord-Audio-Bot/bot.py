@@ -2,8 +2,6 @@ import logging
 from discord.ext import commands
 from config import DISCORD_TOKEN
 from commands import setup_commands
-# from voice_commands import setup_voice_commands
-# from audio_commands import register_commands
 from queue_manager import BotQueue, QueueEntry
 from button_view import ButtonView
 from discord import Intents, PCMVolumeTransformer
@@ -23,8 +21,6 @@ class AudioBot(commands.Bot):
         dummy_entry = QueueEntry(video_url='', best_audio_url='', title='dummy', is_playlist=False, guild_id=None)
         self.add_view(ButtonView(self, dummy_entry))
         await setup_commands(self)
-        # await setup_voice_commands(self)
-        # register_commands(self)
         await self.tree.sync()
 
     async def on_ready(self):

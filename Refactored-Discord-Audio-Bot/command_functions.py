@@ -3,7 +3,6 @@ import asyncio
 import random
 import yt_dlp
 from discord import Attachment, Interaction, utils, Embed
-from youtubesearchpython import VideosSearch
 from queue_manager import QueueEntry, queue_manager
 from playback import PlaybackManager
 from utils import download_file, extract_mp3_metadata, sanitize_title, delete_file
@@ -29,32 +28,44 @@ async def process_play_next(interaction: Interaction, youtube_url: str, youtube_
                 if not interaction.guild.voice_client.is_playing():
                     await playback_manager.play_audio(interaction, entry)
         return
-
+   
     if youtube_title:
         try:
-            videos_search = VideosSearch(youtube_title, limit=1)
-            search_result = videos_search.result()
+            search_query = f"ytsearch1:{youtube_title}"
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'noplaylist': True,
+                'ignoreerrors': True,
+                'cookiefile': 'cookies.txt',
+                'http_headers': {
+                    'User-Agent': (
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    )
+                }
+            }
 
-            if not search_result or not search_result['result']:
-                await interaction.followup.send("No video found for the youtube_title.")
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = await asyncio.get_running_loop().run_in_executor(None, lambda: ydl.extract_info(search_query, download=False))
+
+            if not info or 'entries' not in info or not info['entries']:
+                await interaction.followup.send("No video found for that title.")
                 return
 
-            video_info = search_result['result'][0]
-            video_url = video_info['link']
-            title = video_info['title']
-            thumbnail = video_info['thumbnails'][0]['url']
-            duration_str = video_info.get('duration', '0:00')
+            video = info['entries'][0] if info['entries'] and info['entries'][0] else None
+            if not video:
+                await interaction.followup.send("No valid video found in search results.")
+                return
 
-            duration_parts = list(map(int, duration_str.split(':')))
-            if len(duration_parts) == 2:
-                duration = duration_parts[0] * 60 + duration_parts[1]
-            else:
-                duration = duration_parts[0]
-
-            ydl_opts = {'format': 'bestaudio/best', 'noplaylist': True, 'ignoreerrors': True}
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.get_running_loop().run_in_executor(None, lambda: ydl.extract_info(video_url, download=False))
-                best_audio_url = next((f['url'] for f in info['formats'] if f.get('acodec') != 'none'), video_url)
+            video_url = video.get('webpage_url')
+            title = video.get('title')
+            thumbnail = video.get('thumbnail')
+            duration = video.get('duration', 0)
+            best_audio_url = next((f['url'] for f in video.get('formats', []) if f.get('acodec') != 'none'), video_url)
+            title = video.get('title')
+            thumbnail = video.get('thumbnail')
+            duration = video.get('duration', 0)
+            best_audio_url = next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), video_url)
 
             entry = QueueEntry(
                 video_url=video_url,
@@ -128,33 +139,45 @@ async def process_play(interaction: Interaction, youtube_url: str, youtube_title
                 await playback_manager.play_audio(interaction, entry)
             await interaction.followup.send(f"Added {entry.title} to the queue.")
         return
-
+    
     if youtube_title:
-        logging.debug(f"Search YouTube command executed for query: {youtube_title}")
         try:
-            videos_search = VideosSearch(youtube_title, limit=1)
-            search_result = videos_search.result()
+            search_query = f"ytsearch1:{youtube_title}"
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'noplaylist': True,
+                'ignoreerrors': True,
+                'cookiefile': 'cookies.txt',
+                'http_headers': {
+                    'User-Agent': (
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    )
+                }
+            }
 
-            if not search_result or not search_result['result']:
-                await interaction.followup.send("No video found for the youtube_title.")
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = await asyncio.get_running_loop().run_in_executor(None, lambda: ydl.extract_info(search_query, download=False))
+
+            if not info or 'entries' not in info or not info['entries']:
+                await interaction.followup.send("No video found for that title.")
                 return
 
-            video_info = search_result['result'][0]
-            video_url = video_info['link']
-            title = video_info['title']
-            thumbnail = video_info['thumbnails'][0]['url']
-            duration_str = video_info.get('duration', '0:00')
+            video = info['entries'][0] if info['entries'] and info['entries'][0] else None
+            if not video:
+                await interaction.followup.send("No valid video found in search results.")
+                return
 
-            duration_parts = list(map(int, duration_str.split(':')))
-            if len(duration_parts) == 2:
-                duration = duration_parts[0] * 60 + duration_parts[1]
-            else:
-                duration = duration_parts[0]
+            video_url = video.get('webpage_url')
+            title = video.get('title')
+            thumbnail = video.get('thumbnail')
+            duration = video.get('duration', 0)
+            best_audio_url = next((f['url'] for f in video.get('formats', []) if f.get('acodec') != 'none'), video_url)
 
-            ydl_opts = {'format': 'bestaudio/best', 'noplaylist': True, 'ignoreerrors': True}
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.get_running_loop().run_in_executor(None, lambda: ydl.extract_info(video_url, download=False))
-                best_audio_url = next((f['url'] for f in info['formats'] if f.get('acodec') != 'none'), video_url)
+            title = video.get('title')
+            thumbnail = video.get('thumbnail')
+            duration = video.get('duration', 0)
+            best_audio_url = next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), video_url)
 
             entry = QueueEntry(
                 video_url=video_url,
@@ -165,23 +188,15 @@ async def process_play(interaction: Interaction, youtube_url: str, youtube_title
                 duration=duration
             )
 
-            if not queue_manager.currently_playing:
-                queue.insert(0, entry)
-                queue_manager.save_queues()
-                if not interaction.guild.voice_client:
-                    if interaction.user.voice:
-                        await interaction.user.voice.channel.connect()
-                    else:
-                        await interaction.followup.send("You are not connected to a voice channel.")
-                        return
+            queue.insert(1, entry)
+            queue_manager.save_queues()
+            await interaction.followup.send(f"'{entry.title}' added to the queue at position 2.")
+            if not interaction.guild.voice_client.is_playing():
                 await playback_manager.play_audio(interaction, entry)
-            else:
-                queue_manager.add_to_queue(server_id, entry)
-
-            await interaction.followup.send(f"Added to queue: {title}")
 
         except Exception as e:
-            logging.error(f"Error in search_youtube command: {e}")
+            logging.error(f"Error in play_next command: {e}")
+            print((f"Error in play_next command: {e}"))
             await interaction.followup.send("An error occurred while searching for the video.")
         return
 

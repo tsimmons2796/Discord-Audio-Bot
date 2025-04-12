@@ -195,8 +195,16 @@ class PlaybackManager:
             'format': 'bestaudio/best',
             'noplaylist': False if "list=" in url else True,
             'playlist_items': str(index) if index is not None else None,
-            'ignoreerrors': True
-        }
+            'ignoreerrors': True,
+            'cookiefile': 'cookies.txt',
+            'force_generic_extractor': False,
+            'http_headers': {
+                'User-Agent': (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                    '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    )
+                }
+            }
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -314,7 +322,20 @@ class PlaybackManager:
                 return None
 
     async def fetch_playlist_length(self, url):
-        ydl_opts = {'quiet': True, 'noplaylist': False, 'extract_entries': True, 'ignoreerrors': True}
+        ydl_opts = {
+            'quiet': True,
+            'noplaylist': False,
+            'extract_entries': True,
+            'ignoreerrors': True,
+            'cookiefile': 'cookies.txt',
+            'force_generic_extractor': False,
+            'http_headers': {
+                'User-Agent': (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                    '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    )
+                }
+            }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 logging.debug(f"Fetching playlist length for URL: {url}")
@@ -331,8 +352,16 @@ class PlaybackManager:
             ydl_opts = {
                 'format': 'bestaudio/best',
                 'noplaylist': True,
-                'ignoreerrors': True
-            }
+                'ignoreerrors': True,
+                'cookiefile': 'cookies.txt',
+                'force_generic_extractor': False,
+                'http_headers': {
+                    'User-Agent': (
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                        )
+                    }
+                }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(entry.video_url, download=False)
                 entry.best_audio_url = next((f['url'] for f in info['formats'] if f.get('acodec') != 'none'), entry.video_url)
@@ -341,8 +370,16 @@ class PlaybackManager:
         ydl_opts = {
             'format': 'bestaudio/best',
             'noplaylist': True,
-            'ignoreerrors': True
-        }
+            'ignoreerrors': True,
+            'cookiefile': 'cookies.txt',
+            'force_generic_extractor': False,
+            'http_headers': {
+                'User-Agent': (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                    '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    )
+                }
+            }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(entry.video_url, download=False)
             entry.duration = info.get('duration', 0)

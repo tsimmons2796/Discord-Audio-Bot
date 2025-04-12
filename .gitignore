@@ -161,3 +161,4 @@ cython_debug/
 
 /last_played_audio.json
 /queues.json
+*/cookies.txt
