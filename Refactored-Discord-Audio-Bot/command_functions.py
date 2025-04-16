@@ -406,18 +406,25 @@ async def process_skip(interaction: Interaction):
             await asyncio.sleep(0.5)
 
 async def process_pause(interaction: Interaction):
+    import logging
+
     logging.debug("Pause command executed")
-    server_id = str(interaction.guild.id)
-    if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
-        interaction.guild.voice_client.pause()
-        queue_manager.is_paused = True
-        message = await interaction.original_message()
-        view = message.components[0].view
-        view.paused = True
-        view.update_buttons()
-        await message.edit(view=view)
-        await interaction.response.send_message('Playback paused.')
-        logging.info("Playback paused.")
+
+    # Cancel Pandora task if active
+    guild_id = interaction.guild_id
+    if hasattr(interaction.client, "pandora_tasks"):
+        task = interaction.client.pandora_tasks.get(guild_id)
+        if task and not task.done():
+            task.cancel()
+            logging.info(f"Paused and canceled Pandora session for guild {guild_id}")
+
+    voice_client = interaction.guild.voice_client
+    if voice_client and voice_client.is_playing():
+        voice_client.pause()
+        await interaction.response.send_message("Playback paused.", ephemeral=True)
+    else:
+        await interaction.response.send_message("No audio is currently playing.", ephemeral=True)
+
 
 async def process_resume(interaction: Interaction):
     logging.debug("Resume command executed")
@@ -434,9 +441,20 @@ async def process_resume(interaction: Interaction):
         logging.info("Playback resumed.")
 
 async def process_stop(interaction: Interaction):
+    import logging
+
     logging.debug("Stop command executed")
     queue_manager.currently_playing = None
     queue_manager.stop_is_triggered = True
+
+    # Cancel Pandora task if active
+    guild_id = interaction.guild_id
+    if hasattr(interaction.client, "pandora_tasks"):
+        task = interaction.client.pandora_tasks.get(guild_id)
+        if task and not task.done():
+            task.cancel()
+            logging.info(f"Stopped Pandora session for guild {guild_id}")
+
     if interaction.guild.voice_client:
         try:
             interaction.guild.voice_client.stop()

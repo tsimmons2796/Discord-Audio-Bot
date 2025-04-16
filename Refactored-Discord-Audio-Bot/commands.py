@@ -2,9 +2,12 @@ import logging
 from discord.ext import commands
 from discord import Attachment, Interaction, app_commands
 from queue_manager import queue_manager
+import asyncio
+import aiohttp
 from playback import PlaybackManager
 from typing import Optional
-
+from utils import get_similar_tracks_from_musicbrainz, rate_limited_musicbrainz_get
+from yt_dlp import YoutubeDL
 from command_functions import (
     process_help,
     process_play_next,
@@ -131,6 +134,118 @@ class MusicCommands(commands.Cog):
     async def help_command(self, interaction: Interaction):
         logging.debug("Help command executed")
         await process_help(interaction)
+
+    @app_commands.command(name="off_brand_pandora", description="Play music by mood, genre, or similar to current song.")
+    @app_commands.describe(
+        mood="Mood of the music (e.g., happy, chill, sad)",
+        genres="Genres separated by commas (e.g., rock, electronic, jazz)"
+    )
+    async def off_brand_pandora(
+        self,
+        interaction: Interaction,
+        mood: Optional[str] = None,
+        genres: Optional[str] = None
+    ):
+        logging.info(f"Slash command '/off_brand_pandora' invoked by {interaction.user}. Mood: {mood}, Genres: {genres}")
+        await interaction.response.defer(thinking=True)
+
+        current_entry = queue_manager.currently_playing
+        seed_artist = None
+
+        # 🎯 Step 1: If something is playing, try to extract the artist from the title
+        if current_entry:
+            seed_title = current_entry.title
+            logging.info(f"Using current song as seed: {seed_title}")
+
+            try:
+                search_url = f"https://musicbrainz.org/ws/2/recording/?query={seed_title}&fmt=json&limit=1"
+                async with aiohttp.ClientSession(headers={"User-Agent": config.MUSICBRAINZ_USER_AGENT}) as session:
+                    data = await rate_limited_musicbrainz_get(session, search_url)
+                    if data.get("recordings"):
+                        seed_artist = data["recordings"][0]["artist-credit"][0]["name"]
+                        logging.info(f"Identified seed artist '{seed_artist}' for title '{seed_title}'")
+                    else:
+                        logging.warning(f"No MusicBrainz results for title '{seed_title}'")
+            except Exception as e:
+                logging.error(f"Failed to identify artist from seed title: {e}")
+        else:
+            logging.info("No song currently playing. Will proceed using mood/genre filters.")
+
+        # 🎯 Step 2: Query for similar tracks from seed artist
+        similar_tracks = []
+        if seed_artist:
+            similar_tracks = await get_similar_tracks_from_musicbrainz(seed_artist)
+
+        # 🎯 Step 3: Handle user tags (mood + genres)
+        user_tags = []
+        if mood:
+            user_tags.append(mood.lower())
+        if genres:
+            user_tags.extend([g.strip().lower() for g in genres.split(",")])
+
+        if user_tags:
+            logging.info(f"Enhancing search using mood/genre tags: {user_tags}")
+            try:
+                async with aiohttp.ClientSession(headers={"User-Agent": config.MUSICBRAINZ_USER_AGENT}) as session:
+                    for tag in user_tags:
+                        url = f"https://musicbrainz.org/ws/2/artist/?tag={tag}&limit=3&fmt=json"
+                        data = await rate_limited_musicbrainz_get(session, url)
+                        for artist in data.get("artists", []):
+                            name = artist.get("name")
+                            if name:
+                                tracks = await get_similar_tracks_from_musicbrainz(name, limit=1)
+                                similar_tracks.extend(tracks)
+            except Exception as e:
+                logging.error(f"Error fetching artists by tags: {e}")
+
+        if not similar_tracks:
+            await interaction.followup.send("⚠️ No similar tracks were found.", ephemeral=True)
+            return
+
+        logging.info(f"Final similar tracks list: {similar_tracks}")
+
+        # 🎯 Step 4: Search YouTube and queue
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "noplaylist": True,
+            "quiet": True,
+            "default_search": "ytsearch1",
+            "skip_download": True,
+        }
+
+        async def queue_tracks(tracks):
+            for track in tracks:
+                try:
+                    logging.info(f"Searching YouTube for: {track}")
+                    with YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(track, download=False)
+                        video_info = info['entries'][0] if "entries" in info else info
+                        video_url = video_info.get("webpage_url")
+                        if video_url:
+                            await process_play(interaction, video_url, skip_checks=True)
+                            logging.info(f"Queued: {track}")
+                except Exception as e:
+                    logging.error(f"Failed to queue '{track}': {e}")
+                await asyncio.sleep(1)
+
+        # 🎯 Step 5: Handle task management per guild
+        if not hasattr(interaction.client, "pandora_tasks"):
+            interaction.client.pandora_tasks = {}
+
+        if guild_id := interaction.guild_id:
+            old_task = interaction.client.pandora_tasks.get(guild_id)
+            if old_task and not old_task.done():
+                old_task.cancel()
+                logging.info(f"Canceled old Pandora task for guild {guild_id}")
+
+            task = interaction.client.loop.create_task(queue_tracks(similar_tracks))
+            interaction.client.pandora_tasks[guild_id] = task
+
+        await interaction.followup.send(
+            f"🎧 Off-brand Pandora mode started using mood: {mood or 'None'}, genres: {genres or 'None'}, seed: {seed_artist or 'None'}",
+            ephemeral=True
+        )
+
         
     @commands.command(name='mp3_list_next')
     async def mp3_list_next(self, ctx):

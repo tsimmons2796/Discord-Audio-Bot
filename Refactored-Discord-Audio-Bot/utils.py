@@ -3,7 +3,7 @@ import aiohttp
 import yt_dlp
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from pydub import AudioSegment
+# from pydub import AudioSegment
 from mutagen.mp3 import MP3
 import logging
 import os
@@ -13,8 +13,13 @@ from discord.utils import get
 from discord.errors import NotFound
 from lyricsgenius import Genius
 from dotenv import load_dotenv
+import config  # ✅ Import your config to access MUSICBRAINZ_USER_AGENT
 
 load_dotenv()
+
+# Global rate limit lock and timer
+musicbrainz_lock = asyncio.Lock()
+last_musicbrainz_call = 0
 
 logging.basicConfig(level=logging.DEBUG, filename='utils.log', format='%(asctime)s:%(levelname)s:%(message)s')
 
@@ -45,6 +50,35 @@ UNWANTED_PATTERNS = [
     r'\[ Visualizer \]',
     # Add more patterns as needed
 ]
+
+async def rate_limited_musicbrainz_get(session, url):
+    global last_musicbrainz_call
+
+    try:
+        async with musicbrainz_lock:
+            now = asyncio.get_event_loop().time()
+            wait_time = 1.5 - (now - last_musicbrainz_call)
+            if wait_time > 0:
+                await asyncio.sleep(wait_time)
+            last_musicbrainz_call = asyncio.get_event_loop().time()
+
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status != 200:
+                    logging.warning(f"MusicBrainz request failed with status {response.status} for URL: {url}")
+                    return {}
+                return await response.json()
+
+    except asyncio.TimeoutError:
+        logging.error(f"Timeout during MusicBrainz request: {url}")
+        return {}
+
+    except aiohttp.ClientError as e:
+        logging.error(f"Client error during MusicBrainz request: {url} — {e}")
+        return {}
+
+    except Exception as e:
+        logging.exception(f"Unexpected error during MusicBrainz request: {url} — {e}")
+        return {}
 
 def sanitize_title(title: str) -> str:
     """
@@ -118,6 +152,55 @@ async def delete_file(file_path: str):
         logging.info(f"Deleted file: {file_path}")
     else:
         logging.warning(f"File not found for deletion: {file_path}")
+        
+async def get_similar_tracks_from_musicbrainz(artist_name, limit=5):
+    headers = {
+        "User-Agent": config.MUSICBRAINZ_USER_AGENT
+    }
+
+    recordings = []
+
+    async with aiohttp.ClientSession(headers=headers) as session:
+        try:
+            # Step 1: Search for artist MBID
+            search_url = f"https://musicbrainz.org/ws/2/artist/?query=artist:{artist_name}&fmt=json"
+            data = await rate_limited_musicbrainz_get(session, search_url)
+            if not data.get('artists'):
+                logging.warning(f"No artist found for {artist_name}")
+                return []
+            mbid = data['artists'][0]['id']
+        except Exception as e:
+            logging.error(f"Failed to fetch MBID for {artist_name}: {e}")
+            return []
+
+        try:
+            # Step 2: Get related artists
+            rel_url = f"https://musicbrainz.org/ws/2/artist/{mbid}?inc=artist-rels&fmt=json"
+            data = await rate_limited_musicbrainz_get(session, rel_url)
+            related = [
+                rel['artist']['name']
+                for rel in data.get('relations', [])
+                if rel.get('type') in ["influenced by", "similar to", "collaboration"]
+            ][:limit]
+        except Exception as e:
+            logging.error(f"Failed to fetch related artists for MBID {mbid}: {e}")
+            return []
+
+        # Step 3: For each related artist, get a few recordings
+        for rel_artist in related:
+            try:
+                search_url = f"https://musicbrainz.org/ws/2/recording/?query=artist:{rel_artist}&limit=1&fmt=json"
+                rdata = await rate_limited_musicbrainz_get(session, search_url)
+                if rdata.get('recordings'):
+                    title = rdata['recordings'][0]['title']
+                    recordings.append(f"{rel_artist} - {title}")
+            except Exception as e:
+                logging.error(f"Failed to fetch recording for artist '{rel_artist}': {e}")
+
+    logging.info(f"MusicBrainz suggestions for {artist_name}: {recordings}")
+    return recordings
+
+
 
 async def fetch_info(url, index: int = None):
     ydl_opts = {
