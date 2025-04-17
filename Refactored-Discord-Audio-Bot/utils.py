@@ -1,6 +1,7 @@
 import re
 import aiohttp
 import yt_dlp
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 # from pydub import AudioSegment
@@ -154,53 +155,65 @@ async def delete_file(file_path: str):
         logging.warning(f"File not found for deletion: {file_path}")
         
 async def get_similar_tracks_from_musicbrainz(artist_name, limit=5):
+    import urllib.parse
+    import aiohttp
+    import asyncio
+    import logging
+
     headers = {
         "User-Agent": config.MUSICBRAINZ_USER_AGENT
     }
 
     recordings = []
 
-    async with aiohttp.ClientSession(headers=headers) as session:
-        try:
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
             # Step 1: Search for artist MBID
-            search_url = f"https://musicbrainz.org/ws/2/artist/?query=artist:{artist_name}&fmt=json"
-            data = await rate_limited_musicbrainz_get(session, search_url)
-            if not data.get('artists'):
-                logging.warning(f"No artist found for {artist_name}")
-                return []
-            mbid = data['artists'][0]['id']
-        except Exception as e:
-            logging.error(f"Failed to fetch MBID for {artist_name}: {e}")
-            return []
+            search_url = f"https://musicbrainz.org/ws/2/artist/?query=artist:{urllib.parse.quote(artist_name)}&fmt=json"
+            logging.info(f"🔍 Looking up MBID for seed artist: {artist_name} | URL: {search_url}")
+            async with session.get(search_url) as res:
+                data = await res.json()
+                if not data.get('artists'):
+                    logging.warning(f"⚠️ No artist found for {artist_name}")
+                    return []
+                mbid = data['artists'][0]['id']
+                logging.info(f"✅ Found MBID for artist '{artist_name}': {mbid}")
 
-        try:
             # Step 2: Get related artists
             rel_url = f"https://musicbrainz.org/ws/2/artist/{mbid}?inc=artist-rels&fmt=json"
-            data = await rate_limited_musicbrainz_get(session, rel_url)
-            related = [
-                rel['artist']['name']
-                for rel in data.get('relations', [])
-                if rel.get('type') in ["influenced by", "similar to", "collaboration"]
-            ][:limit]
-        except Exception as e:
-            logging.error(f"Failed to fetch related artists for MBID {mbid}: {e}")
-            return []
+            logging.info(f"🔗 Getting related artists for MBID: {mbid} | URL: {rel_url}")
+            async with session.get(rel_url) as res:
+                data = await res.json()
+                related = [
+                    rel['artist']['name']
+                    for rel in data.get('relations', [])
+                    if rel.get('type') in ["influenced by", "similar to", "collaboration"]
+                ][:limit]
+                logging.info(f"🎯 Related artists found: {related}")
 
-        # Step 3: For each related artist, get a few recordings
-        for rel_artist in related:
-            try:
-                search_url = f"https://musicbrainz.org/ws/2/recording/?query=artist:{rel_artist}&limit=1&fmt=json"
-                rdata = await rate_limited_musicbrainz_get(session, search_url)
-                if rdata.get('recordings'):
-                    title = rdata['recordings'][0]['title']
-                    recordings.append(f"{rel_artist} - {title}")
-            except Exception as e:
-                logging.error(f"Failed to fetch recording for artist '{rel_artist}': {e}")
+            # Step 3: For each related artist, get a few recordings
+            for rel_artist in related:
+                try:
+                    encoded_artist = urllib.parse.quote(f'"{rel_artist}"')
+                    track_url = f"https://musicbrainz.org/ws/2/recording/?query=artist:{encoded_artist}&limit=2&fmt=json"
+                    logging.info(f"🎶 Searching for top tracks of '{rel_artist}' | URL: {track_url}")
 
-    logging.info(f"MusicBrainz suggestions for {artist_name}: {recordings}")
+                    async with session.get(track_url) as res:
+                        rdata = await res.json()
+                        for recording in rdata.get('recordings', []):
+                            title = recording.get('title')
+                            if title:
+                                track_string = f"{rel_artist} - {title}"
+                                recordings.append(track_string)
+                                logging.info(f"🎧 Found track: {track_string}")
+                except Exception as e:
+                    logging.error(f"❌ Failed to fetch tracks for '{rel_artist}': {e}")
+                await asyncio.sleep(1.5)  # Rate limit buffer
+    except Exception as e:
+        logging.error(f"🚨 Failed to fetch similar tracks from MusicBrainz for artist '{artist_name}': {e}")
+
+    logging.info(f"✅ MusicBrainz suggestions for '{artist_name}': {recordings}")
     return recordings
-
-
 
 async def fetch_info(url, index: int = None):
     ydl_opts = {

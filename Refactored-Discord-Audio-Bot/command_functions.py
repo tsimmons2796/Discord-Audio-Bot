@@ -174,11 +174,6 @@ async def process_play(interaction: Interaction, youtube_url: str, youtube_title
             duration = video.get('duration', 0)
             best_audio_url = next((f['url'] for f in video.get('formats', []) if f.get('acodec') != 'none'), video_url)
 
-            title = video.get('title')
-            thumbnail = video.get('thumbnail')
-            duration = video.get('duration', 0)
-            best_audio_url = next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), video_url)
-
             entry = QueueEntry(
                 video_url=video_url,
                 best_audio_url=best_audio_url,
