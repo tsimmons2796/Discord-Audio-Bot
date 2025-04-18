@@ -1,62 +1,99 @@
-# TODO: Off-Brand Pandora Mode for Discord Radio Bot
+🎟️ Story Ticket: Enhance Pandora-style Discovery with Spotify API Integration
+Summary: We want to improve the discover command by using Spotify's rich music metadata and recommendations engine. The current implementation uses Last.fm to get similar artists and tag-based results. The goal is to replace or augment this with Spotify to offer a more intelligent, relevant, and customizable music discovery experience.
 
-## Feature Goal:
+✅ Acceptance Criteria:
+User can invoke /discover with the same base functionality (mood, genre).
 
-Implement a new slash command `/discover` that allows a user to:
+Spotify is used to search for a seed track or seed artist (from currently playing or tags).
 
-- Choose a "mood" and genre(s) to start an auto-playing music session.
-- OR use the currently playing song to discover and queue similar music.
-- Continuously play related music until the user explicitly stops it.
+Spotify recommendation endpoint is used to find new songs.
 
----
+The results are searched on YouTube and queued using the existing logic.
 
-## Implementation Steps
+Supports "Surprise me" mode if no seed or tags are specified.
 
-### ✅ Step 1: Add Slash Command
+Provides ephemeral confirmation message listing mood, genre, seed artist, and count of queued results.
 
-- [ ] Define a new slash command `/discover` in `commands.py`.
-- [ ] Accept parameters: mood (optional), genre(s) (optional).
-- [ ] Detect if a song is currently playing to optionally seed from that.
+🔧 Implementation Tasks:
+🔐 API & Authentication
+Register a Spotify Developer app at https://developer.spotify.com.
 
-### ✅ Step 2: Get Song Info (if available)
+Store SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET in .env.
 
-- [ ] Use current queue or `now_playing_helper.py` to extract artist/title.
-- [ ] Normalize and sanitize song metadata for API use.
+Add logic in config.py to expose Spotify keys.
 
-### ✅ Step 3: MusicBrainz Integration
+Implement a function to authenticate and retrieve a bearer token using client credentials flow.
 
-- [ ] Use `musicbrainzngs` or raw HTTP to:
-  - [ ] Search for artist based on current or selected genre.
-  - [ ] Retrieve similar artists via artist-rels.
-  - [ ] Retrieve top songs from those artists.
-- [ ] (Optional) Use AcousticBrainz for mood/genre filtering.
+Endpoint: POST https://accounts.spotify.com/api/token
 
-### ✅ Step 4: Queue Background Playback
+Auth: Basic Base64(client_id:client_secret)
 
-- [ ] Create a loop task to search and queue YouTube links using `yt_dlp`.
-- [ ] Leverage existing `queue_manager` and playback logic.
-- [ ] Ensure songs queue one by one as each track ends.
+Body: grant_type=client_credentials
 
-### ✅ Step 5: Control & Stop Logic
+🎵 Seed Track / Artist Identification
+If currently playing track exists, use its title to search for a Spotify track.
 
-- [ ] Monitor if user pauses, stops, or kills the bot.
-- [ ] Cancel the background task on stop.
-- [ ] Add flag to prevent multiple sessions running simultaneously.
+Endpoint: GET https://api.spotify.com/v1/search?q={title}&type=track&limit=1
 
----
+Use artist and track ID from the result as seed inputs.
 
-## Optional Enhancements
+If mood/genre are provided, compile a list of Spotify genre seeds (Spotify requires specific genres only).
 
-- [ ] Add interactive buttons to skip or fine-tune recommendations.
-- [ ] Persist session state in a file or cache in case of restart.
-- [ ] Use Discord embeds to show current "radio session" metadata.
+If neither, enter “Surprise me” mode and pull from Spotify’s popular/curated recommendation lists.
 
----
+🧠 Get Recommendations
+Build a call to Spotify’s recommendations endpoint:
 
-## Files Affected
+GET https://api.spotify.com/v1/recommendations
 
-- `commands.py`
-- `command_functions.py`
-- `now_playing_helper.py`
-- `playback.py`
-- `queue_manager.py`
+Parameters:
+
+seed_artists, seed_tracks, seed_genres
+
+Optional: min_energy, target_danceability, max_valence (based on mood)
+
+Parse the response to extract track name and artist.
+
+Combine these into queryable strings for YouTube (e.g. "Apashe - Distance").
+
+📺 YouTube Queue Integration
+For each track returned, search using yt_dlp logic already in place.
+
+Use process_play or process_play_next to add to the queue.
+
+Ensure duplicates (by title) are filtered before queuing.
+
+🧪 New Features for Usability (Optional Enhancements)
+Add autocomplete on supported Spotify genre tags.
+
+Add toggle options:
+
+/discover surprise_me: true
+
+/discover min_energy: 0.6
+
+/discover limit: 10
+
+Add debug log showing which Spotify seeds and filters were used.
+
+💬 UI/UX Enhancements
+Modify followup message to show:
+
+Mood: Happy
+
+Genres: Pop, Indie
+
+Seed Artist: Apashe
+
+Songs Queued: 10
+
+🧪 Testing Tasks
+Test command with seed track from queue.
+
+Test with genres and mood only.
+
+Test with "Surprise Me" mode.
+
+Validate YouTube search results and queue population.
+
+Validate auth token refresh logic works and doesn't break under concurrency.
