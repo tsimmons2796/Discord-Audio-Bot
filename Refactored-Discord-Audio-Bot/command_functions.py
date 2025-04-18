@@ -2,6 +2,7 @@ import logging
 import asyncio
 import random
 import yt_dlp
+import os
 from discord import Attachment, Interaction, utils, Embed
 from queue_manager import QueueEntry, queue_manager
 from playback import PlaybackManager
@@ -109,7 +110,18 @@ async def process_play_next(interaction: Interaction, youtube_url: str, youtube_
 
     await interaction.followup.send("Please provide a valid YouTube URL, YouTube title, or attach an MP3 file.")
 
-async def process_play(interaction: Interaction, youtube_url: str, youtube_title: str, mp3_file: Optional[Attachment]):
+async def process_play(interaction: Interaction, youtube_url: str = None, youtube_title: str = None, mp3_file: Optional[Attachment] = None):
+    """
+    Process a play command to add a track to the queue and start playback if nothing is playing.
+    
+    Args:
+        interaction: The Discord interaction object
+        youtube_url: Optional YouTube URL to play
+        youtube_title: Optional YouTube title to search for
+        mp3_file: Optional MP3 file attachment to play
+    """
+    logging.debug(f"process_play called with youtube_url={youtube_url}, youtube_title={youtube_title}, mp3_file={mp3_file}")
+    
     voice_client = interaction.guild.voice_client
     if not voice_client and interaction.user.voice:
         voice_client = await interaction.user.voice.channel.connect()
@@ -401,8 +413,6 @@ async def process_skip(interaction: Interaction):
             await asyncio.sleep(0.5)
 
 async def process_pause(interaction: Interaction):
-    import logging
-
     logging.debug("Pause command executed")
 
     # Cancel Pandora task if active
@@ -420,7 +430,6 @@ async def process_pause(interaction: Interaction):
     else:
         await interaction.response.send_message("No audio is currently playing.", ephemeral=True)
 
-
 async def process_resume(interaction: Interaction):
     logging.debug("Resume command executed")
     server_id = str(interaction.guild.id)
@@ -436,8 +445,6 @@ async def process_resume(interaction: Interaction):
         logging.info("Playback resumed.")
 
 async def process_stop(interaction: Interaction):
-    import logging
-
     logging.debug("Stop command executed")
     queue_manager.currently_playing = None
     queue_manager.stop_is_triggered = True
@@ -612,7 +619,7 @@ async def process_search_and_play_from_queue(interaction: Interaction, title: st
     entry = queue.pop(entry_index)
     queue.insert(0, entry)
     queue_manager.save_queues()
-
+    
     voice_client = interaction.guild.voice_client
     if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
         voice_client.stop()
@@ -621,7 +628,7 @@ async def process_search_and_play_from_queue(interaction: Interaction, title: st
     if not voice_client:
         if interaction.user.voice:
             await interaction.user.voice.channel.connect()
-
+    
     await playback_manager.play_audio(interaction, entry)
 
 async def process_help(interaction: Interaction):

@@ -8,6 +8,7 @@ load_dotenv()
 GENIUS_API_TOKEN = os.getenv('genius_api_token')
 DISCORD_TOKEN = os.getenv('discord_token')
 MUSICBRAINZ_USER_AGENT = os.getenv("MUSICBRAINZ_USER_AGENT")
+LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
 
 # Other configuration settings
 LOGGING_CONFIG = {

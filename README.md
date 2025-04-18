@@ -143,3 +143,83 @@ The bot is started by running the `run_bot` function, which loads the bot token,
 - The bot uses yt-dlp for YouTube extraction, which must be installed and accessible.
 
 This bot provides a comprehensive set of features for managing and playing audio in your Discord server. Customize and extend the functionality as needed for your specific use case.
+
+🎧 Popular Genre Tags on MusicBrainz:
+These are reliable inputs under genres:
+
+rock
+
+pop
+
+hip hop
+
+electronic
+
+jazz
+
+metal
+
+punk
+
+r&b
+
+country
+
+reggae
+
+classical
+
+folk
+
+blues
+
+techno
+
+house
+
+trance
+
+drum and bass
+
+k-pop
+
+j-pop
+
+indie
+
+alternative
+
+🎵 Common Mood-Like Tags:
+These are more freeform but still valid as mood input:
+
+happy
+
+chill
+
+sad
+
+dark
+
+upbeat
+
+mellow
+
+aggressive
+
+romantic
+
+nostalgic
+
+relaxing
+
+energetic
+
+moody
+
+calm
+
+melancholic
+
+dreamy
+
+ambient

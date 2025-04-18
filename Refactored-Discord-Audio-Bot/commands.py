@@ -2,12 +2,13 @@ import logging
 from discord.ext import commands
 from discord import Attachment, Interaction, app_commands
 from queue_manager import queue_manager
-from config import MUSICBRAINZ_USER_AGENT
+from config import LASTFM_API_KEY
+from urllib.parse import quote_plus
+import aiohttp
 import asyncio
 import aiohttp
 from playback import PlaybackManager
 from typing import Optional
-from utils import get_similar_tracks_from_musicbrainz, rate_limited_musicbrainz_get
 from yt_dlp import YoutubeDL
 from command_functions import (
     process_help,
@@ -39,6 +40,9 @@ class MusicCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         logging.debug("Initializing MusicCommands Cog")
+        # Initialize pandora_tasks dictionary for memory management
+        if not hasattr(bot, "pandora_tasks"):
+            bot.pandora_tasks = {}
 
     async def title_autocomplete(self, interaction: Interaction, current: str):
         server_id = str(interaction.guild.id)
@@ -146,87 +150,85 @@ class MusicCommands(commands.Cog):
         interaction: Interaction,
         mood: Optional[str] = None,
         genres: Optional[str] = None
-):
-        print("🔊 /off_brand_pandora command triggered")
-        logging.info(f"/off_brand_pandora was invoked by {interaction.user}")
-        logging.info(f"/off_brand_pandora invoked by {interaction.user}. Mood: {mood}, Genres: {genres}")
+    ):
+        logging.info(f"/off_brand_pandora triggered by {interaction.user}")
         await interaction.response.defer(thinking=True)
 
+        guild_id = str(interaction.guild.id)
         current_entry = queue_manager.currently_playing
         seed_artist = None
         similar_tracks = []
+        processed_tracks = set()
 
         if current_entry:
-            print(f"🎵 Current entry title: {current_entry.title}")
             seed_title = current_entry.title
-            logging.info(f"Using current song title as seed: {seed_title}")
-
             try:
-                search_url = f"https://musicbrainz.org/ws/2/recording/?query={seed_title}&fmt=json&limit=1"
-                print(f"🌐 Looking up seed artist from title | URL: {search_url}")
-                async with aiohttp.ClientSession(headers={"User-Agent": MUSICBRAINZ_USER_AGENT}) as session:
-                    data = await rate_limited_musicbrainz_get(session, search_url)
-                    print(f"📥 Seed artist lookup response: {data}")
-                    if data.get("recordings"):
-                        seed_artist = data["recordings"][0]["artist-credit"][0]["name"]
-                        print(f"✅ Found seed artist: {seed_artist}")
-                        logging.info(f"Identified seed artist: {seed_artist}")
-                    else:
-                        print("⚠️ No recordings found for seed title")
-                        logging.warning(f"No recording results for seed title: {seed_title}")
+                query = quote_plus(seed_title)
+                url = f"http://ws.audioscrobbler.com/2.0/?method=track.search&track={query}&api_key={LASTFM_API_KEY}&format=json&limit=1"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url) as resp:
+                        data = await resp.json()
+                        results = data.get("results", {}).get("trackmatches", {}).get("track", [])
+                        if results:
+                            seed_artist = results[0]["artist"]
+                            logging.info(f"Seed artist found: {seed_artist}")
             except Exception as e:
-                print(f"❌ Error looking up seed artist: {e}")
-                logging.error(f"Failed to identify seed artist: {e}")
-        else:
-            print("⚠️ No current song playing")
-            logging.info("No current song playing; skipping seed-based recommendation.")
+                logging.error(f"Seed artist lookup failed: {e}")
 
         if seed_artist:
-            print(f"🔎 Fetching similar tracks for seed artist: {seed_artist}")
-            logging.info(f"Fetching similar tracks based on seed artist: {seed_artist}")
-            similar_tracks = await get_similar_tracks_from_musicbrainz(seed_artist)
-            print(f"🎶 Seed-based similar tracks: {similar_tracks}")
+            try:
+                encoded_artist = quote_plus(seed_artist)
+                url = f"http://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&artist={encoded_artist}&api_key={LASTFM_API_KEY}&format=json&limit=5"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url) as resp:
+                        data = await resp.json()
+                        for artist in data.get("similarartists", {}).get("artist", []):
+                            name = artist.get("name")
+                            if name.lower() not in ["various artists", "[unknown]"]:
+                                top_tracks_url = f"http://ws.audioscrobbler.com/2.0/?method=artist.gettoptracks&artist={quote_plus(name)}&api_key={LASTFM_API_KEY}&format=json&limit=2"
+                                async with session.get(top_tracks_url) as track_resp:
+                                    track_data = await track_resp.json()
+                                    tracks = track_data.get("toptracks", {}).get("track", [])
+                                    for t in tracks:
+                                        title = f"{name} - {t['name']}"
+                                        if title not in processed_tracks:
+                                            similar_tracks.append(title)
+                                            processed_tracks.add(title)
+            except Exception as e:
+                logging.error(f"Failed to fetch similar artist tracks: {e}")
 
         user_tags = []
         if mood:
             user_tags.append(mood.lower())
         if genres:
             user_tags.extend([g.strip().lower() for g in genres.split(",")])
-        print(f"🏷️ User tags: {user_tags}")
-        logging.info(f"User tags parsed: {user_tags}")
 
         if user_tags:
             try:
-                async with aiohttp.ClientSession(headers={"User-Agent": MUSICBRAINZ_USER_AGENT}) as session:
+                async with aiohttp.ClientSession() as session:
                     for tag in user_tags:
-                        url = f"https://musicbrainz.org/ws/2/artist/?query=tag:{tag}&limit=3&fmt=json"
-                        print(f"🔎 Looking up artists for tag: {tag} | URL: {url}")
-                        logging.debug(f"Looking up artists for tag '{tag}' | URL: {url}")
-                        data = await rate_limited_musicbrainz_get(session, url)
-                        print(f"📥 Tag lookup result: {data}")
-                        for artist in data.get("artists", []):
-                            name = artist.get("name")
-                            if name and name.lower() not in ["various artists", "[unknown]"]:
-
-                                print(f"🎤 Found artist for tag '{tag}': {name}")
-                                logging.info(f"Found artist from tag '{tag}': {name}")
-                                tracks = await get_similar_tracks_from_musicbrainz(name, limit=1)
-                                print(f"🎶 Tracks for tag-based artist '{name}': {tracks}")
-                                if tracks:
-                                    logging.info(f"Tracks found for tag-based artist '{name}': {tracks}")
-                                similar_tracks.extend(tracks)
+                        tag_url = f"http://ws.audioscrobbler.com/2.0/?method=tag.gettopartists&tag={quote_plus(tag)}&api_key={LASTFM_API_KEY}&format=json&limit=5"
+                        async with session.get(tag_url) as resp:
+                            data = await resp.json()
+                            top_artists = data.get("topartists", {}).get("artist", [])
+                            for artist in top_artists:
+                                name = artist.get("name")
+                                if name.lower() not in ["various artists", "[unknown]"] and name not in processed_tracks:
+                                    top_tracks_url = f"http://ws.audioscrobbler.com/2.0/?method=artist.gettoptracks&artist={quote_plus(name)}&api_key={LASTFM_API_KEY}&format=json&limit=2"
+                                    async with session.get(top_tracks_url) as track_resp:
+                                        track_data = await track_resp.json()
+                                        tracks = track_data.get("toptracks", {}).get("track", [])
+                                        for t in tracks:
+                                            title = f"{name} - {t['name']}"
+                                            if title not in processed_tracks:
+                                                similar_tracks.append(title)
+                                                processed_tracks.add(title)
             except Exception as e:
-                print(f"❌ Error during tag-based enrichment: {e}")
-                logging.error(f"Error during tag-based enrichment: {e}")
+                logging.error(f"Failed during tag-based enrichment: {e}")
 
         if not similar_tracks:
-            print("⚠️ No similar tracks found after all steps.")
-            logging.warning("No similar tracks found after all lookup methods.")
-            await interaction.followup.send("⚠️ No similar tracks were found.", ephemeral=True)
+            await interaction.followup.send("⚠️ No tracks found. Try different tags or play a song first.", ephemeral=True)
             return
-
-        print(f"🎼 Total similar tracks ready for YouTube search: {len(similar_tracks)}")
-        logging.info(f"Total similar tracks to queue: {len(similar_tracks)}")
 
         ydl_opts = {
             "format": "bestaudio/best",
@@ -234,43 +236,39 @@ class MusicCommands(commands.Cog):
             "quiet": True,
             "default_search": "ytsearch1",
             "skip_download": True,
+            "ignoreerrors": True,
+            "cookiefile": "cookies.txt",
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+            }
         }
 
         async def queue_tracks(tracks):
             for track in tracks:
                 try:
-                    print(f"🔍 Searching YouTube for: {track}")
-                    logging.info(f"Searching YouTube for: {track}")
                     with YoutubeDL(ydl_opts) as ydl:
                         info = ydl.extract_info(track, download=False)
-                        video_info = info['entries'][0] if "entries" in info else info
+                        video_info = info["entries"][0] if "entries" in info and info["entries"] else info
                         video_url = video_info.get("webpage_url")
-                        print(f"▶️ YouTube URL found: {video_url}")
                         if video_url:
-                            await process_play(interaction, video_url, skip_checks=True)
-                            print(f"✅ Track queued: {track}")
-                            logging.info(f"Queued track: {track}")
+                            await process_play(interaction, youtube_url=video_url)
+                            logging.info(f"Queued: {track}")
                 except Exception as e:
-                    print(f"❌ Failed to queue track '{track}': {e}")
-                    logging.error(f"Failed to queue track '{track}': {e}")
+                    logging.error(f"Failed to queue {track}: {e}")
                 await asyncio.sleep(1)
 
-        if not hasattr(interaction.client, "pandora_tasks"):
-            interaction.client.pandora_tasks = {}
-
-        if guild_id := interaction.guild_id:
-            print(f"📡 Managing guild task for guild ID: {guild_id}")
-            old_task = interaction.client.pandora_tasks.get(guild_id)
+        if guild_id:
+            old_task = self.bot.pandora_tasks.get(guild_id)
             if old_task and not old_task.done():
                 old_task.cancel()
-                print(f"⛔ Canceled previous Pandora task for guild {guild_id}")
-                logging.info(f"Canceled previous Pandora session for guild {guild_id}")
-            task = interaction.client.loop.create_task(queue_tracks(similar_tracks))
-            interaction.client.pandora_tasks[guild_id] = task
+            task = asyncio.create_task(queue_tracks(similar_tracks))
+            self.bot.pandora_tasks[guild_id] = task
 
-        print(f"🎧 Pandora mode launched successfully with mood='{mood}' and genres='{genres}'")
         await interaction.followup.send(
-            f"🎧 Pandora mode started!\nMood: {mood or 'None'}\nGenres: {genres or 'None'}\nSeed: {seed_artist or 'None'}",
+            f"🎧 Pandora mode started!\nMood: {mood or 'None'}\nGenres: {genres or 'None'}\nSeed: {seed_artist or 'None'}\nQueued {len(similar_tracks)} tracks.",
             ephemeral=True
         )
         
