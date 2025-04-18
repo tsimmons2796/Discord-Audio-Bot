@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document provides a comprehensive overview of the `/off_brand_pandora` command implementation for the Discord Audio Bot. The command creates a Pandora-like music discovery experience by recommending and queueing tracks based on mood, genre, or the currently playing song.
+This document provides a comprehensive overview of the `/discover` command implementation for the Discord Audio Bot. The command creates a Pandora-like music discovery experience by recommending and queueing tracks based on mood, genre, or the currently playing song.
 
 ## Features
 
@@ -36,7 +36,7 @@ This document provides a comprehensive overview of the `/off_brand_pandora` comm
 
 ### Command Structure
 
-The `/off_brand_pandora` command accepts two optional parameters:
+The `/discover` command accepts two optional parameters:
 - `mood`: A string representing the desired mood (e.g., happy, chill, sad)
 - `genres`: A comma-separated list of genres (e.g., rock,electronic,jazz)
 
@@ -80,22 +80,22 @@ The implementation includes comprehensive error handling at each step of the pro
 
 1. **Mood-based discovery**:
    ```
-   /off_brand_pandora mood:happy
+   /discover mood:happy
    ```
 
 2. **Genre-based discovery**:
    ```
-   /off_brand_pandora genres:rock,electronic
+   /discover genres:rock,electronic
    ```
 
 3. **Combined mood and genre**:
    ```
-   /off_brand_pandora mood:chill genres:jazz,lofi
+   /discover mood:chill genres:jazz,lofi
    ```
 
 4. **Based on current song**:
    ```
-   /off_brand_pandora
+   /discover
    ```
 
 ## Technical Considerations

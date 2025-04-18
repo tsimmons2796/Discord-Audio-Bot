@@ -14,6 +14,35 @@ logging.basicConfig(level=logging.DEBUG, filename='commands.log', format='%(asct
 
 playback_manager = PlaybackManager(queue_manager)
 
+async def process_remove_duplicates(interaction: Interaction):
+    logging.debug("Remove duplicates command executed")
+    server_id = str(interaction.guild.id)
+    queue = queue_manager.get_queue(server_id)
+
+    if not queue:
+        await interaction.response.send_message("The queue is currently empty.")
+        return
+
+    seen_titles = set()
+    unique_queue = []
+    removed_titles = []
+
+    for entry in queue:
+        if entry.title.lower() not in seen_titles:
+            unique_queue.append(entry)
+            seen_titles.add(entry.title.lower())
+        else:
+            removed_titles.append(entry.title)
+
+    queue_manager.queues[server_id] = unique_queue
+    queue_manager.save_queues()
+
+    if removed_titles:
+        await interaction.response.send_message(f"Removed {len(removed_titles)} duplicate entries from the queue.")
+    else:
+        await interaction.response.send_message("No duplicates found in the queue.")
+
+
 async def process_play_next(interaction: Interaction, youtube_url: str, youtube_title: str, mp3_file: Optional[Attachment]):
     server_id = str(interaction.guild.id)
     queue = queue_manager.get_queue(server_id)

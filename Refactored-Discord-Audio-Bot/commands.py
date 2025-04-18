@@ -29,7 +29,8 @@ from command_functions import (
     process_mp3_list,
     process_clear_queue,
     process_move_to_next,
-    process_search_and_play_from_queue
+    process_search_and_play_from_queue,
+    process_remove_duplicates
 )
 
 logging.basicConfig(level=logging.DEBUG, filename='commands.log', format='%(asctime)s:%(levelname)s:%(message)s')
@@ -56,6 +57,11 @@ class MusicCommands(commands.Cog):
         await interaction.response.defer()  # Defer the interaction response
         logging.debug(f"Play next command executed for youtube_url: {youtube_url}, youtube_title: {youtube_title}, mp3_file: {mp3_file}")
         await process_play_next(interaction, youtube_url, youtube_title, mp3_file)
+        
+    @app_commands.command(name='remove_duplicates', description='Remove duplicate songs from the queue based on title.')
+    async def remove_duplicates(self, interaction: Interaction):
+        logging.debug("Remove duplicates command triggered")
+        await process_remove_duplicates(interaction)
 
     @app_commands.command(name='play', description='Play a YT URL, YT Title, or MP3 file if no audio is playing or add it to the end of the queue.')
     async def play(self, interaction: Interaction, youtube_url: str = None, youtube_title: str = None, mp3_file: Optional[Attachment] = None):
@@ -140,18 +146,18 @@ class MusicCommands(commands.Cog):
         logging.debug("Help command executed")
         await process_help(interaction)
 
-    @app_commands.command(name="off_brand_pandora", description="Play music by mood, genre, or similar to current song.")
+    @app_commands.command(name="discover", description="Play music by mood, genre, or similar to current song.")
     @app_commands.describe(
         mood="Mood of the music (e.g., happy, chill, sad)",
         genres="Genres separated by commas (e.g., rock, electronic, jazz)"
     )
-    async def off_brand_pandora(
+    async def discover(
         self,
         interaction: Interaction,
         mood: Optional[str] = None,
         genres: Optional[str] = None
     ):
-        logging.info(f"/off_brand_pandora triggered by {interaction.user}")
+        logging.info(f"/discover triggered by {interaction.user}")
         await interaction.response.defer(thinking=True)
 
         guild_id = str(interaction.guild.id)
