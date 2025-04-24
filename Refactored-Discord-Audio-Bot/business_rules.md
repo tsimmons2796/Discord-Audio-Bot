@@ -189,7 +189,6 @@ The Discord Radio Bot is built with a modular architecture consisting of several
 - `/clear_queue`: Removes all tracks from queue except current
 - `/remove_queue`: Removes a track by its position in queue
 - `/remove_by_title`: Removes a track by its title
-- `/search_youtube`: Searches YouTube and adds result to queue
 - `/search_and_play_from_queue`: Finds and plays a track from queue
 
 ### Dot Commands

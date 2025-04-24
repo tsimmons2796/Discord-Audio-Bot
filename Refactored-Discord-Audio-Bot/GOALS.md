@@ -360,29 +360,6 @@ Handle multiple MP3 files or YouTube URLs provided as attachments via the `.mp3_
 
 ---
 
-## 17. Search YouTube and Add to Queue
-
-**Objective:**  
-Allow users to search for a YouTube video using `/search_youtube` and add the result to the queue.
-
-**Expected Behavior:**
-
-- **Search Execution:**
-  - Trigger `search_youtube` and execute `MusicCommands.search_youtube`.
-- **Information Retrieval:**
-  - Fetch video info using `fetch_info`.
-- **Queue Update & Playback:**
-  - Create a `QueueEntry` and add it to the queue.
-  - Initiate playback if no track is currently playing, or append otherwise.
-
-**Acceptance Criteria:**
-
-- The search query returns correct video information.
-- The new queue entry reflects the searched video.
-- Playback status is consistent with the queue’s state.
-
----
-
 ## 18. Search and Play from Queue
 
 **Objective:**  

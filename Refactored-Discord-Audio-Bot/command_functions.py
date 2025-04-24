@@ -1,4 +1,5 @@
 import logging
+import re
 import asyncio
 import random
 import yt_dlp
@@ -9,6 +10,9 @@ from playback import PlaybackManager
 from utils import download_file, extract_mp3_metadata, sanitize_title, delete_file
 from button_view import ButtonView
 from typing import Optional
+from config import LASTFM_API_KEY
+from urllib.parse import quote_plus
+import aiohttp
 
 logging.basicConfig(level=logging.DEBUG, filename='commands.log', format='%(asctime)s:%(levelname)s:%(message)s')
 
@@ -721,3 +725,140 @@ async def process_help(interaction: Interaction):
 
     for embed in help_embeds:
         await interaction.response.send_message(embed=embed)
+    
+async def discover_and_queue_recommendations(interaction, artist_or_song: Optional[str] = None):
+    def extract_artist_from_input(input_str):
+        match = re.match(r"(.+?)\s*[-|–]\s*.+", input_str)
+        return match.group(1).strip() if match else input_str.strip()
+
+    seed = artist_or_song or (queue_manager.currently_playing.title if queue_manager.currently_playing else None)
+    if not seed:
+        raise Exception("No artist or song provided and nothing is currently playing.")
+
+    clean_artist_name = extract_artist_from_input(seed)
+
+    async with aiohttp.ClientSession() as session:
+        # 1. Get similar artists
+        similar_url = f"http://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&artist={quote_plus(clean_artist_name)}&api_key={LASTFM_API_KEY}&format=json"
+        async with session.get(similar_url) as resp:
+            data = await resp.json()
+            similar_artists = data.get("similarartists", {}).get("artist", [])
+            if not similar_artists:
+                print(f"No similar artists found for {clean_artist_name}")
+                return 0, seed, "Last.fm"
+
+        artist_names = [artist["name"] for artist in similar_artists[:5]]
+
+        # 2. Get top 2 tracks per similar artist
+        recommendations = []
+        for artist in artist_names:
+            top_url = f"http://ws.audioscrobbler.com/2.0/?method=artist.gettoptracks&artist={quote_plus(artist)}&api_key={LASTFM_API_KEY}&format=json"
+            async with session.get(top_url) as resp:
+                top_data = await resp.json()
+                tracks = top_data.get("toptracks", {}).get("track", [])
+                if isinstance(tracks, list):
+                    for track in tracks[:2]:
+                        title = track["name"]
+                        if title:
+                            recommendations.append(f"{artist} - {title}")
+
+        # 3. Queue with existing logic
+        count = 0
+        for rec in recommendations:
+            await asyncio.sleep(1)  # Respect YouTube rate limits
+            try:
+                await process_play(interaction, youtube_title=rec)
+                count += 1
+            except Exception as e:
+                print(f"Error queuing {rec}: {e}")
+
+        return count, seed, "Last.fm"
+
+        
+def extract_artist_from_input(text: str) -> str:
+    """Extract artist name from a string that may include a song title."""
+    if " - " in text:
+        return text.split(" - ")[0].strip()
+    return text.strip()
+
+async def get_lastfm_similar_artists(artist_name: str) -> list[str]:
+    try:
+        url = f"http://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&artist={quote_plus(artist_name)}&api_key={LASTFM_API_KEY}&format=json"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                logging.info(f"Last.fm similar artists status: {resp.status}")
+                data = await resp.json()
+                artists = data.get("similarartists", {}).get("artist", [])
+                return [artist["name"] for artist in artists[:5]]
+    except Exception as e:
+        logging.error(f"Failed to get similar artists from Last.fm: {e}")
+        return []
+    
+async def get_lastfm_top_tracks(artist_name: str) -> list[dict]:
+    try:
+        url = f"http://ws.audioscrobbler.com/2.0/?method=artist.gettoptracks&artist={quote_plus(artist_name)}&api_key={LASTFM_API_KEY}&format=json"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                logging.info(f"Last.fm top tracks status for {artist_name}: {resp.status}")
+                data = await resp.json()
+                tracks = data.get("toptracks", {}).get("track", [])
+                return [{"artist": artist_name, "title": track["name"]} for track in tracks[:2]]
+    except Exception as e:
+        logging.error(f"Failed to get top tracks for {artist_name} from Last.fm: {e}")
+        return []
+
+async def get_lastfm_recommendations(artist_name: str) -> list[dict]:
+    similar_artists = await get_lastfm_similar_artists(artist_name)
+    if not similar_artists:
+        logging.info(f"No similar artists found for {artist_name}")
+        return []
+
+    recommendations = []
+    for similar in similar_artists:
+        top_tracks = await get_lastfm_top_tracks(similar)
+        recommendations.extend(top_tracks)
+
+    return recommendations
+
+async def discover_and_queue_recommendations(interaction, artist_or_song):
+    server_id = str(interaction.guild.id)
+    queue_manager.ensure_queue_exists(server_id)
+
+    # 1. Determine seed
+    currently_playing = queue_manager.currently_playing
+    seed = artist_or_song or (currently_playing.title if currently_playing else None)
+
+    if not seed:
+        await interaction.followup.send("No song is currently playing and no input was provided.")
+        return 0, "None", "Last.fm"
+
+    logging.info(f"🌱 Discovery seed: {seed}")
+    artist_name = seed.split(" - ")[0].strip()
+
+    async with aiohttp.ClientSession() as session:
+        # 2. Get similar artists from Last.fm
+        sim_url = f"http://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&artist={quote_plus(artist_name)}&api_key={LASTFM_API_KEY}&format=json"
+        async with session.get(sim_url) as resp:
+            similar_data = await resp.json()
+            similar_artists = similar_data.get("similarartists", {}).get("artist", [])[:3]
+
+        if not similar_artists:
+            await interaction.followup.send(f"No similar artists found for {seed}.")
+            return 0, seed, "Last.fm"
+
+        total_queued = 0
+
+        # 3. Get top tracks from each similar artist
+        for artist in similar_artists:
+            name = artist["name"]
+            top_url = f"http://ws.audioscrobbler.com/2.0/?method=artist.gettoptracks&artist={quote_plus(name)}&api_key={LASTFM_API_KEY}&format=json"
+            async with session.get(top_url) as resp:
+                top_data = await resp.json()
+                top_tracks = top_data.get("toptracks", {}).get("track", [])[:2]
+                for track in top_tracks:
+                    title = f"{track['artist']['name']} - {track['name']}"
+                    await process_play(interaction, youtube_title=title)
+                    total_queued += 1
+
+    return total_queued, seed, "Last.fm"
+

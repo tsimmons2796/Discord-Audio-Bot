@@ -477,3 +477,250 @@ Edit
 ...
 
 🪄 Added 6 new songs to your queue. Type /discover again to keep exploring!
+
+✅ /discover Command – Logic Flow Overview
+This command adds recommended songs to the queue based on:
+
+the currently playing track (if no user input is given)
+
+OR user-provided artist or song name (if provided)
+
+🔁 UNIVERSAL ENTRY LOGIC
+python
+Copy
+Edit
+if user_provided_artist_or_song:
+seed = user_input
+elif currently_playing_track:
+seed = currently_playing_track.title
+else:
+respond("No song is currently playing and no input was provided.")
+return
+🟩 PRIMARY FLOW — SPOTIFY-BASED LOGIC
+
+1. Search for Track/Artist on Spotify
+   python
+   Copy
+   Edit
+   track_info = search_spotify_track(seed)
+   if not track_info:
+   Fallback to Last.fm
+   Return object:
+
+json
+Copy
+Edit
+{
+"track_name": "Enter Sandman",
+"artist_name": "Metallica",
+"artist_id": "spotify:artist:xyz"
+} 2. Get Related Artists from Spotify
+python
+Copy
+Edit
+related_artists = get_spotify_related_artists(track_info.artist_id)
+if not related_artists:
+Fallback to Last.fm 3. Get Top Tracks for Related Artists
+python
+Copy
+Edit
+recommendations = []
+for artist_id in related_artists[:5]:
+tracks = get_spotify_top_tracks(artist_id)
+recommendations.extend(tracks[:2]) 4. Add to Queue
+python
+Copy
+Edit
+for track in recommendations:
+await process_play(interaction, youtube_title=track["name"] + " - " + track["artist"])
+🟥 FALLBACK FLOW — LAST.FM-BASED LOGIC
+
+1. Search for Artist Name on Last.fm
+   python
+   Copy
+   Edit
+   lastfm_artist = extract_artist_name(seed)
+2. Fetch Similar Artists
+   python
+   Copy
+   Edit
+   similar_artists = get_lastfm_similar_artists(lastfm_artist)
+   if not similar_artists:
+   respond("No similar artists found on Last.fm.")
+   return
+   Example return:
+
+json
+Copy
+Edit
+["Slipknot", "Avenged Sevenfold", "Trivium", "Bullet For My Valentine"] 3. Get Top Tracks for Each Artist
+python
+Copy
+Edit
+recommendations = []
+for artist in similar_artists[:5]:
+tracks = get_lastfm_top_tracks(artist)
+recommendations.extend(tracks[:2])
+Track return:
+
+json
+Copy
+Edit
+[{"artist": "Trivium", "title": "In Waves"}, {"artist": "Trivium", "title": "Strife"}] 4. Add to Queue
+python
+Copy
+Edit
+for track in recommendations:
+await process_play(interaction, youtube_title=track["artist"] + " - " + track["title"])
+⚠️ Error Resilience Summary
+Spotify API returns no results → fallback to Last.fm
+
+If Last.fm also returns nothing → gracefully notify the user
+
+Track parsing issues, unavailable YouTube videos, or errors in process_play → log and skip without halting
+
+💡 Bonus Behavior: When User Wants More
+Trigger
+User presses a “🔁 Discover More” button or reuses /discover.
+
+Logic
+Pick a random or next artist from the original related list (Spotify or Last.fm cache).
+
+Repeat steps 2–4 of the corresponding flow.
+
+🧪 Example Output (User Input: "Bring Me The Horizon")
+text
+Copy
+Edit
+🎵 Found: Bring Me The Horizon
+🔁 Getting Related Artists from Spotify...
+
+✅ Similar artists:
+
+- Asking Alexandria
+- I Prevail
+- Motionless In White
+  ...
+
+🎧 Top Tracks:
+• Asking Alexandria - Alone In A Room
+• I Prevail - Hurricane
+• Motionless In White - Another Life
+...
+
+🪄 Added 6 new songs to your queue. Type /discover again to keep exploring!
+
+🧠 Project Goal
+Enhance the /discover command by:
+
+Using Spotify's API to recommend music.
+
+Falling back to Last.fm if Spotify fails.
+
+Automatically queuing tracks on YouTube based on artist similarity.
+
+🔐 Authentication
+Register Spotify app at Spotify Developer Dashboard.
+
+Store SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET in .env.
+
+Authenticate using Client Credentials Flow.
+
+🧪 Input Handling
+If user provides artist or song: use that as the seed.
+
+Else if a song is currently playing: extract artist name.
+
+Else: show error → “No input provided and no song playing.”
+
+🎵 Spotify Discovery Logic
+Search for Seed Artist/Track
+GET /v1/search?q={query}&type=track&limit=1
+
+Get Related Artists
+GET /v1/artists/{id}/related-artists
+
+Fetch Top Tracks (2 per related artist)
+GET /v1/artists/{id}/top-tracks?market=US
+
+Queue Results via YouTube
+For each: "{artist} - {track}" → process_play()
+
+🟥 Fallback: Last.fm Logic
+Search Artist Name
+Use seed to extract clean artist name.
+
+Get Similar Artists
+artist.getSimilar
+
+Fetch Top Tracks per Artist
+artist.getTopTracks
+
+Queue to YouTube
+Same format: "{artist} - {track}" → process_play()
+
+⚠️ Error Resilience
+Spotify fails → fallback to Last.fm.
+
+Last.fm fails → notify user.
+
+Log all issues without crashing command.
+
+💬 User Feedback
+Confirm queued tracks.
+
+Show:
+
+Mood (if used)
+
+Genres (if used)
+
+Seed artist
+
+Number of songs queued
+
+Message is ephemeral.
+
+🧰 Refactoring Tasks
+❌ Remove deprecated logic:
+
+get_spotify_recommendations()
+
+Seed/mood combo retry logic
+
+404 Spotify fallback errors
+
+✅ Add new logic:
+
+Seed resolution
+
+Related artist → top tracks → YouTube queue
+
+🌱 Surprise Me Mode
+If no input: use trending/popular Spotify content (optional).
+
+Later: add support for energy, valence, danceability filters.
+
+🧪 Testing Checklist
+/discover with current track → ✅ queues results.
+
+/discover with user input → ✅ queues results.
+
+Spotify fails → Last.fm fallback works.
+
+Track titles format correctly for YouTube.
+
+Token refresh works without crashing.
+
+🌀 Extra Features
+Cache related artists for "Discover More" button.
+
+Autocomplete supported Spotify genre tags.
+
+Slash command options:
+
+limit: 10
+
+surprise_me: true
+
+min_energy: 0.6
