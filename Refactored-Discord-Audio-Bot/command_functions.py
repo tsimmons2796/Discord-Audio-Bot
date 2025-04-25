@@ -9,7 +9,7 @@ from queue_manager import QueueEntry, queue_manager
 from playback import PlaybackManager
 from utils import download_file, extract_mp3_metadata, sanitize_title, delete_file
 from button_view import ButtonView
-from typing import Optional
+from typing import Optional, List, Dict, Tuple, Set
 from config import LASTFM_API_KEY
 from urllib.parse import quote_plus
 import aiohttp
@@ -65,56 +65,20 @@ async def process_play_next(interaction: Interaction, youtube_url: str, youtube_
    
     if youtube_title:
         try:
-            search_query = f"ytsearch1:{youtube_title}"
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'noplaylist': True,
-                'ignoreerrors': True,
-                'cookiefile': 'cookies.txt',
-                'http_headers': {
-                    'User-Agent': (
-                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-                        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                    )
-                }
-            }
-
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.get_running_loop().run_in_executor(None, lambda: ydl.extract_info(search_query, download=False))
-
-            if not info or 'entries' not in info or not info['entries']:
-                await interaction.followup.send("No video found for that title.")
-                return
-
-            video = info['entries'][0] if info['entries'] and info['entries'][0] else None
-            if not video:
-                await interaction.followup.send("No valid video found in search results.")
-                return
-
-            video_url = video.get('webpage_url')
-            title = video.get('title')
-            thumbnail = video.get('thumbnail')
-            duration = video.get('duration', 0)
-            best_audio_url = next((f['url'] for f in video.get('formats', []) if f.get('acodec') != 'none'), video_url)
-            title = video.get('title')
-            thumbnail = video.get('thumbnail')
-            duration = video.get('duration', 0)
-            best_audio_url = next((f['url'] for f in video['formats'] if f.get('acodec') != 'none'), video_url)
-
-            entry = QueueEntry(
-                video_url=video_url,
-                best_audio_url=best_audio_url,
-                title=title,
-                is_playlist=False,
-                thumbnail=thumbnail,
-                duration=duration
-            )
-
-            queue.insert(1, entry)
-            queue_manager.save_queues()
-            await interaction.followup.send(f"'{entry.title}' added to the queue at position 2.")
-            if not interaction.guild.voice_client.is_playing():
-                await playback_manager.play_audio(interaction, entry)
+            # Check if a track with this title is already in the queue
+            queue_titles = set(entry.title.lower() for entry in queue)
+            
+            # Try to find a non-duplicate YouTube result
+            entry = await find_non_duplicate_youtube_result(youtube_title, queue_titles, interaction)
+            
+            if entry:
+                queue.insert(1, entry)
+                queue_manager.save_queues()
+                await interaction.followup.send(f"'{entry.title}' added to the queue at position 2.")
+                if not interaction.guild.voice_client.is_playing():
+                    await playback_manager.play_audio(interaction, entry)
+            else:
+                await interaction.followup.send("Could not find a unique track that isn't already in the queue.")
 
         except Exception as e:
             logging.error(f"Error in play_next command: {e}")
@@ -130,7 +94,6 @@ async def process_play_next(interaction: Interaction, youtube_url: str, youtube_
                 best_audio_url=file_path,
                 title=metadata['title'],
                 is_playlist=False,
-                playlist_index=None,
                 thumbnail=metadata['thumbnail'],
                 duration=metadata['duration']
             )
@@ -187,56 +150,23 @@ async def process_play(interaction: Interaction, youtube_url: str = None, youtub
     
     if youtube_title:
         try:
-            search_query = f"ytsearch1:{youtube_title}"
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'noplaylist': True,
-                'ignoreerrors': True,
-                'cookiefile': 'cookies.txt',
-                'http_headers': {
-                    'User-Agent': (
-                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-                        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                    )
-                }
-            }
-
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.get_running_loop().run_in_executor(None, lambda: ydl.extract_info(search_query, download=False))
-
-            if not info or 'entries' not in info or not info['entries']:
-                await interaction.followup.send("No video found for that title.")
-                return
-
-            video = info['entries'][0] if info['entries'] and info['entries'][0] else None
-            if not video:
-                await interaction.followup.send("No valid video found in search results.")
-                return
-
-            video_url = video.get('webpage_url')
-            title = video.get('title')
-            thumbnail = video.get('thumbnail')
-            duration = video.get('duration', 0)
-            best_audio_url = next((f['url'] for f in video.get('formats', []) if f.get('acodec') != 'none'), video_url)
-
-            entry = QueueEntry(
-                video_url=video_url,
-                best_audio_url=best_audio_url,
-                title=title,
-                is_playlist=False,
-                thumbnail=thumbnail,
-                duration=duration
-            )
-
-            queue.insert(1, entry)
-            queue_manager.save_queues()
-            await interaction.followup.send(f"'{entry.title}' added to the queue at position 2.")
-            if not interaction.guild.voice_client.is_playing():
-                await playback_manager.play_audio(interaction, entry)
+            # Get all current titles in the queue (lowercase for case-insensitive comparison)
+            queue_titles = set(entry.title.lower() for entry in queue)
+            
+            # Try to find a non-duplicate YouTube result
+            entry = await find_non_duplicate_youtube_result(youtube_title, queue_titles, interaction)
+            
+            if entry:
+                queue_manager.add_to_queue(server_id, entry)
+                if not interaction.guild.voice_client.is_playing():
+                    await playback_manager.play_audio(interaction, entry)
+                await interaction.followup.send(f"Added '{entry.title}' to the queue.")
+            else:
+                await interaction.followup.send("Could not find a unique track that isn't already in the queue.")
 
         except Exception as e:
-            logging.error(f"Error in play_next command: {e}")
-            print((f"Error in play_next command: {e}"))
+            logging.error(f"Error in play command: {e}")
+            print((f"Error in play command: {e}"))
             await interaction.followup.send("An error occurred while searching for the video.")
         return
 
@@ -255,6 +185,242 @@ async def process_play(interaction: Interaction, youtube_url: str = None, youtub
         return
 
     await interaction.followup.send("Please provide a valid URL, YouTube video title, or attach an MP3 file.")
+
+async def find_non_duplicate_youtube_result(search_query: str, queue_titles: Set[str], interaction: Interaction, max_attempts: int = 10) -> Optional[QueueEntry]:
+    """
+    Search YouTube for a track that isn't already in the queue.
+    
+    Args:
+        search_query: The search query to use
+        queue_titles: Set of lowercase titles already in the queue
+        interaction: The Discord interaction object
+        max_attempts: Maximum number of search attempts
+        
+    Returns:
+        QueueEntry if a non-duplicate is found, None otherwise
+    """
+    logging.info(f"Searching for non-duplicate YouTube result for: {search_query}")
+    
+    # If the search query is an artist only, append "music" to get better results
+    if " - " not in search_query:
+        search_query = f"{search_query} music"
+    
+    # Extract artist name for additional searches if needed
+    artist_name = extract_artist_from_input(search_query)
+    
+    # Try the original search first
+    entry = await search_youtube_for_non_duplicate(search_query, queue_titles)
+    if entry:
+        return entry
+    
+    # If original search resulted in a duplicate, try searching for more tracks by the artist
+    if " - " in search_query:  # Only do this for artist - title format
+        logging.info(f"Original search resulted in duplicate, trying more tracks by {artist_name}")
+        
+        # Get top tracks for this artist from Last.fm
+        try:
+            top_tracks = await get_lastfm_top_tracks(artist_name, limit=20)  # Increased limit for more options
+            
+            # Try each track until we find a non-duplicate
+            attempts = 0
+            for track in top_tracks:
+                if attempts >= max_attempts:
+                    break
+                    
+                attempts += 1
+                track_title = f"{track['artist']} - {track['title']}"
+                
+                # Skip if this track title is already in the queue
+                if is_title_duplicate(track_title, queue_titles):
+                    logging.info(f"Skipping duplicate track title: {track_title}")
+                    continue
+                
+                # Try to search YouTube for this track
+                entry = await search_youtube_for_non_duplicate(track_title, queue_titles)
+                if entry:
+                    return entry
+        except Exception as e:
+            logging.error(f"Error getting Last.fm top tracks: {e}")
+    
+    # If we still don't have a result, try with "official audio" or "official video" appended
+    for suffix in ["official audio", "official video", "lyrics", "live", "acoustic"]:
+        modified_query = f"{search_query} {suffix}"
+        logging.info(f"Trying modified search: {modified_query}")
+        
+        entry = await search_youtube_for_non_duplicate(modified_query, queue_titles)
+        if entry:
+            return entry
+    
+    # If we still don't have a result, try similar artists
+    try:
+        similar_artists = await get_lastfm_similar_artists(artist_name, limit=10)
+        
+        attempts = 0
+        for similar_artist in similar_artists:
+            if attempts >= max_attempts:
+                break
+                
+            # Get top tracks for similar artist
+            similar_artist_tracks = await get_lastfm_top_tracks(similar_artist, limit=5)
+            
+            for track in similar_artist_tracks:
+                if attempts >= max_attempts:
+                    break
+                    
+                attempts += 1
+                track_title = f"{track['artist']} - {track['title']}"
+                
+                # Skip if this track title is already in the queue
+                if is_title_duplicate(track_title, queue_titles):
+                    logging.info(f"Skipping duplicate track title: {track_title}")
+                    continue
+                
+                # Try to search YouTube for this track
+                entry = await search_youtube_for_non_duplicate(track_title, queue_titles)
+                if entry:
+                    return entry
+    except Exception as e:
+        logging.error(f"Error getting similar artists: {e}")
+    
+    # No non-duplicate found after all attempts
+    return None
+
+async def search_youtube_for_non_duplicate(search_query: str, queue_titles: Set[str], max_results: int = 5) -> Optional[QueueEntry]:
+    """
+    Search YouTube for a specific query and check if the result is already in the queue.
+    
+    Args:
+        search_query: The search query to use
+        queue_titles: Set of lowercase titles already in the queue
+        max_results: Maximum number of results to check
+        
+    Returns:
+        QueueEntry if a non-duplicate is found, None otherwise
+    """
+    try:
+        # Use ytsearch5 to get multiple results instead of just one
+        yt_search_query = f"ytsearch{max_results}:{search_query}"
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'noplaylist': True,
+            'ignoreerrors': True,
+            'cookiefile': 'cookies.txt',
+            'http_headers': {
+                'User-Agent': (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                    '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                )
+            }
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await asyncio.get_running_loop().run_in_executor(None, lambda: ydl.extract_info(yt_search_query, download=False))
+
+        if not info or 'entries' not in info or not info['entries']:
+            logging.warning(f"No videos found for search: {search_query}")
+            return None
+
+        # Check each result until we find a non-duplicate
+        for video in info['entries']:
+            if not video:
+                continue
+                
+            video_url = video.get('webpage_url')
+            title = video.get('title')
+            thumbnail = video.get('thumbnail')
+            duration = video.get('duration', 0)
+            
+            # Skip videos that are too long (over 10 minutes)
+            if duration > 600:
+                logging.info(f"Skipping long video: {title} ({duration} seconds)")
+                continue
+                
+            best_audio_url = next((f['url'] for f in video.get('formats', []) if f.get('acodec') != 'none'), video_url)
+
+            # Check if this YouTube result is already in the queue
+            if is_title_duplicate(title, queue_titles):
+                logging.info(f"YouTube result '{title}' is already in the queue, checking next result")
+                continue
+
+            entry = QueueEntry(
+                video_url=video_url,
+                best_audio_url=best_audio_url,
+                title=title,
+                is_playlist=False,
+                thumbnail=thumbnail,
+                duration=duration
+            )
+
+            return entry
+
+        # If we get here, all results were duplicates
+        logging.info(f"All {len(info['entries'])} results for '{search_query}' were duplicates")
+        return None
+
+    except Exception as e:
+        logging.error(f"Error searching YouTube: {e}")
+        return None
+
+def is_title_duplicate(title: str, queue_titles: Set[str]) -> bool:
+    """
+    Check if a title is a duplicate in the queue.
+    
+    Args:
+        title: The title to check
+        queue_titles: Set of lowercase titles already in the queue
+        
+    Returns:
+        True if the title is a duplicate, False otherwise
+    """
+    # Convert to lowercase for case-insensitive comparison
+    title_lower = title.lower()
+    
+    # Direct match
+    if title_lower in queue_titles:
+        return True
+    
+    # Try to normalize the title to handle slight variations
+    normalized_title = normalize_title(title_lower)
+    
+    # Check if any queue title is similar enough to be considered a duplicate
+    for queue_title in queue_titles:
+        normalized_queue_title = normalize_title(queue_title)
+        
+        # If normalized titles match, consider it a duplicate
+        if normalized_title == normalized_queue_title:
+            return True
+        
+        # If one title contains the other completely, consider it a duplicate
+        if normalized_title in normalized_queue_title or normalized_queue_title in normalized_title:
+            # Only consider it a duplicate if the length difference is small
+            if abs(len(normalized_title) - len(normalized_queue_title)) < 10:
+                return True
+    
+    return False
+
+def normalize_title(title: str) -> str:
+    """
+    Normalize a title to handle slight variations.
+    
+    Args:
+        title: The title to normalize
+        
+    Returns:
+        Normalized title
+    """
+    # Remove common words and characters that don't affect the core song identity
+    title = re.sub(r'\b(official|video|audio|lyrics|hd|4k|remix|version|feat|ft|featuring|prod|by)\b', '', title, flags=re.IGNORECASE)
+    
+    # Remove parentheses and brackets and their contents
+    title = re.sub(r'\([^)]*\)|\[[^\]]*\]', '', title)
+    
+    # Remove special characters and extra spaces
+    title = re.sub(r'[^\w\s]', '', title)
+    
+    # Remove extra whitespace
+    title = re.sub(r'\s+', ' ', title).strip()
+    
+    return title
 
 async def process_previous(interaction: Interaction):
     logging.debug("Previous command executed")
@@ -386,117 +552,71 @@ async def process_list_queue(interaction: Interaction):
                 f"**Favorited by:** {', '.join([user['name'] for user in entry.favorited_by]) if entry.favorited_by else 'No one'}"
             )
         fields.append({"name": field_name, "description": field_value})
-    
+
+    # Create multiple embeds if needed
     max_fields_per_embed = 25
     queue_embeds = []
     for i in range(0, len(fields), max_fields_per_embed):
-        embed_fields = fields[i:i + max_fields_per_embed]
-        embed = create_embed("Current Queue", f"Listing entries {i + 1} - {i + len(embed_fields)}", embed_fields)
-        queue_embeds.append(embed)
+        queue_embeds.append(create_embed("Current Queue", f"Total tracks: {len(queue)}", fields[i:i + max_fields_per_embed]))
 
-    # Send the first embed with the interaction response
-    await interaction.response.send_message(embed=queue_embeds[0])
-
-    # Send the rest of the embeds as follow-up messages
-    for embed in queue_embeds[1:]:
-        await interaction.followup.send(embed=embed)
-    
-    if queue_manager.currently_playing:
-        await ButtonView.send_now_playing_for_buttons(interaction, queue_manager.currently_playing)
+    for embed in queue_embeds:
+        await interaction.channel.send(embed=embed)
 
 async def process_remove_queue(interaction: Interaction, index: int):
     logging.debug(f"Remove queue command executed for index: {index}")
     server_id = str(interaction.guild.id)
     queue = queue_manager.get_queue(server_id)
-    adjusted_index = index - 1
+    if not queue:
+        await interaction.response.send_message("The queue is currently empty.")
+        return
 
-    if 0 <= adjusted_index < len(queue):
-        removed_entry = queue.pop(adjusted_index)
-        queue_manager.save_queues()
-        if removed_entry.best_audio_url.startswith("downloaded-mp3s/"):
-            await delete_file(removed_entry.best_audio_url)
-        await interaction.response.send_message(f"Removed '{removed_entry.title}' from the queue.")
-    else:
-        await interaction.response.send_message("Invalid index. Please provide a valid index of the song to remove.")
+    if index < 1 or index > len(queue):
+        await interaction.response.send_message(f"Invalid index. Please provide a number between 1 and {len(queue)}.")
+        return
+
+    entry = queue.pop(index - 1)
+    queue_manager.save_queues()
+    if entry.best_audio_url.startswith("downloaded-mp3s/"):
+        await delete_file(entry.best_audio_url)
+    await interaction.response.send_message(f"Removed '{entry.title}' from the queue.")
 
 async def process_skip(interaction: Interaction):
     logging.debug("Skip command executed")
-    server_id = str(interaction.guild.id)
-    queue = queue_manager.get_queue(server_id)
-    if not queue:
-        await interaction.response.send_message("Queue is empty.")
+    if not interaction.guild.voice_client or not interaction.guild.voice_client.is_playing():
+        await interaction.response.send_message("Nothing is currently playing.")
         return
 
-    if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
-        current_entry = queue_manager.currently_playing
-        if current_entry:
-            if current_entry.has_been_arranged and current_entry.has_been_played_after_arranged:
-                current_entry.has_been_arranged = False
-                current_entry.has_been_played_after_arranged = False
-            elif current_entry.has_been_arranged and not current_entry.has_been_played_after_arranged:
-                current_entry.has_been_played_after_arranged = True
-                queue.remove(current_entry)
-                queue.append(current_entry)
-                queue_manager.save_queues()
-            elif not queue_manager.has_been_shuffled:
-                queue.remove(current_entry)
-                queue.append(current_entry)
-                queue_manager.save_queues()
-            interaction.guild.voice_client.stop()
-            await asyncio.sleep(0.5)
+    interaction.guild.voice_client.stop()
+    await interaction.response.send_message("Skipped the current track.")
 
 async def process_pause(interaction: Interaction):
     logging.debug("Pause command executed")
+    if not interaction.guild.voice_client or not interaction.guild.voice_client.is_playing():
+        await interaction.response.send_message("Nothing is currently playing.")
+        return
 
-    # Cancel Pandora task if active
-    guild_id = interaction.guild_id
-    if hasattr(interaction.client, "pandora_tasks"):
-        task = interaction.client.pandora_tasks.get(guild_id)
-        if task and not task.done():
-            task.cancel()
-            logging.info(f"Paused and canceled Pandora session for guild {guild_id}")
-
-    voice_client = interaction.guild.voice_client
-    if voice_client and voice_client.is_playing():
-        voice_client.pause()
-        await interaction.response.send_message("Playback paused.", ephemeral=True)
-    else:
-        await interaction.response.send_message("No audio is currently playing.", ephemeral=True)
+    interaction.guild.voice_client.pause()
+    await interaction.response.send_message("Paused the current track.")
 
 async def process_resume(interaction: Interaction):
     logging.debug("Resume command executed")
-    server_id = str(interaction.guild.id)
-    if interaction.guild.voice_client and interaction.guild.voice_client.is_paused():
-        interaction.guild.voice_client.resume()
-        queue_manager.is_paused = False
-        message = await interaction.original_message()
-        view = message.components[0].view
-        view.paused = False
-        view.update_buttons()
-        await message.edit(view=view)
-        await interaction.response.send_message('Playback resumed.')
-        logging.info("Playback resumed.")
+    if not interaction.guild.voice_client or not interaction.guild.voice_client.is_paused():
+        await interaction.response.send_message("Nothing is currently paused.")
+        return
+
+    interaction.guild.voice_client.resume()
+    await interaction.response.send_message("Resumed playback.")
 
 async def process_stop(interaction: Interaction):
     logging.debug("Stop command executed")
-    queue_manager.currently_playing = None
-    queue_manager.stop_is_triggered = True
+    if not interaction.guild.voice_client:
+        await interaction.response.send_message("The bot is not connected to a voice channel.")
+        return
 
-    # Cancel Pandora task if active
-    guild_id = interaction.guild_id
-    if hasattr(interaction.client, "pandora_tasks"):
-        task = interaction.client.pandora_tasks.get(guild_id)
-        if task and not task.done():
-            task.cancel()
-            logging.info(f"Stopped Pandora session for guild {guild_id}")
-
-    if interaction.guild.voice_client:
-        try:
-            interaction.guild.voice_client.stop()
-        except Exception as e:
-            logging.error(f"Error stopping the voice client: {e}")
-        await interaction.guild.voice_client.disconnect()
-        await interaction.response.send_message('Playback stopped and disconnected.', ephemeral=True)
+    if interaction.guild.voice_client.is_playing() or interaction.guild.voice_client.is_paused():
+        interaction.guild.voice_client.stop()
+    await interaction.guild.voice_client.disconnect()
+    await interaction.response.send_message("Stopped playback and disconnected from the voice channel.")
 
 async def process_restart(interaction: Interaction):
     logging.debug("Restart command executed")
@@ -727,103 +847,23 @@ async def process_help(interaction: Interaction):
         await interaction.response.send_message(embed=embed)
     
 async def discover_and_queue_recommendations(interaction, artist_or_song: Optional[str] = None):
-    def extract_artist_from_input(input_str):
-        match = re.match(r"(.+?)\s*[-|–]\s*.+", input_str)
-        return match.group(1).strip() if match else input_str.strip()
-
-    seed = artist_or_song or (queue_manager.currently_playing.title if queue_manager.currently_playing else None)
-    if not seed:
-        raise Exception("No artist or song provided and nothing is currently playing.")
-
-    clean_artist_name = extract_artist_from_input(seed)
-
-    async with aiohttp.ClientSession() as session:
-        # 1. Get similar artists
-        similar_url = f"http://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&artist={quote_plus(clean_artist_name)}&api_key={LASTFM_API_KEY}&format=json"
-        async with session.get(similar_url) as resp:
-            data = await resp.json()
-            similar_artists = data.get("similarartists", {}).get("artist", [])
-            if not similar_artists:
-                print(f"No similar artists found for {clean_artist_name}")
-                return 0, seed, "Last.fm"
-
-        artist_names = [artist["name"] for artist in similar_artists[:5]]
-
-        # 2. Get top 2 tracks per similar artist
-        recommendations = []
-        for artist in artist_names:
-            top_url = f"http://ws.audioscrobbler.com/2.0/?method=artist.gettoptracks&artist={quote_plus(artist)}&api_key={LASTFM_API_KEY}&format=json"
-            async with session.get(top_url) as resp:
-                top_data = await resp.json()
-                tracks = top_data.get("toptracks", {}).get("track", [])
-                if isinstance(tracks, list):
-                    for track in tracks[:2]:
-                        title = track["name"]
-                        if title:
-                            recommendations.append(f"{artist} - {title}")
-
-        # 3. Queue with existing logic
-        count = 0
-        for rec in recommendations:
-            await asyncio.sleep(1)  # Respect YouTube rate limits
-            try:
-                await process_play(interaction, youtube_title=rec)
-                count += 1
-            except Exception as e:
-                print(f"Error queuing {rec}: {e}")
-
-        return count, seed, "Last.fm"
-
-        
-def extract_artist_from_input(text: str) -> str:
-    """Extract artist name from a string that may include a song title."""
-    if " - " in text:
-        return text.split(" - ")[0].strip()
-    return text.strip()
-
-async def get_lastfm_similar_artists(artist_name: str) -> list[str]:
-    try:
-        url = f"http://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&artist={quote_plus(artist_name)}&api_key={LASTFM_API_KEY}&format=json"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                logging.info(f"Last.fm similar artists status: {resp.status}")
-                data = await resp.json()
-                artists = data.get("similarartists", {}).get("artist", [])
-                return [artist["name"] for artist in artists[:5]]
-    except Exception as e:
-        logging.error(f"Failed to get similar artists from Last.fm: {e}")
-        return []
+    """
+    Discover and queue songs based on the current song or input artist, avoiding duplicates across all artists.
     
-async def get_lastfm_top_tracks(artist_name: str) -> list[dict]:
-    try:
-        url = f"http://ws.audioscrobbler.com/2.0/?method=artist.gettoptracks&artist={quote_plus(artist_name)}&api_key={LASTFM_API_KEY}&format=json"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                logging.info(f"Last.fm top tracks status for {artist_name}: {resp.status}")
-                data = await resp.json()
-                tracks = data.get("toptracks", {}).get("track", [])
-                return [{"artist": artist_name, "title": track["name"]} for track in tracks[:2]]
-    except Exception as e:
-        logging.error(f"Failed to get top tracks for {artist_name} from Last.fm: {e}")
-        return []
-
-async def get_lastfm_recommendations(artist_name: str) -> list[dict]:
-    similar_artists = await get_lastfm_similar_artists(artist_name)
-    if not similar_artists:
-        logging.info(f"No similar artists found for {artist_name}")
-        return []
-
-    recommendations = []
-    for similar in similar_artists:
-        top_tracks = await get_lastfm_top_tracks(similar)
-        recommendations.extend(top_tracks)
-
-    return recommendations
-
-async def discover_and_queue_recommendations(interaction, artist_or_song):
+    Args:
+        interaction: The Discord interaction object
+        artist_or_song: Optional artist or song to use as seed instead of currently playing track
+        
+    Returns:
+        Tuple containing (number of tracks queued, seed used, source of recommendations)
+    """
     server_id = str(interaction.guild.id)
     queue_manager.ensure_queue_exists(server_id)
-
+    current_queue = queue_manager.get_queue(server_id)
+    
+    # Get all current titles in the queue (lowercase for case-insensitive comparison)
+    queue_titles = set(entry.title.lower() for entry in current_queue)
+    
     # 1. Determine seed
     currently_playing = queue_manager.currently_playing
     seed = artist_or_song or (currently_playing.title if currently_playing else None)
@@ -833,32 +873,336 @@ async def discover_and_queue_recommendations(interaction, artist_or_song):
         return 0, "None", "Last.fm"
 
     logging.info(f"🌱 Discovery seed: {seed}")
-    artist_name = seed.split(" - ")[0].strip()
-
-    async with aiohttp.ClientSession() as session:
+    artist_name = extract_artist_from_input(seed)
+    
+    # Track artists we've already processed to avoid duplicates
+    processed_artists = set()
+    total_queued = 0
+    max_attempts = 50  # Increased limit for more thorough search
+    target_tracks = 8  # Target number of tracks to queue
+    
+    try:
         # 2. Get similar artists from Last.fm
-        sim_url = f"http://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&artist={quote_plus(artist_name)}&api_key={LASTFM_API_KEY}&format=json"
-        async with session.get(sim_url) as resp:
-            similar_data = await resp.json()
-            similar_artists = similar_data.get("similarartists", {}).get("artist", [])[:3]
-
+        similar_artists = await get_lastfm_similar_artists(artist_name, limit=20)  # Get more similar artists
         if not similar_artists:
-            await interaction.followup.send(f"No similar artists found for {seed}.")
+            await interaction.followup.send(f"No similar artists found for {artist_name}.")
             return 0, seed, "Last.fm"
+        
+        # Add seed artist to the list of artists to process
+        all_artists = [artist_name] + similar_artists
+        queued_tracks = []
+        attempts = 0
+        
+        # 3. Process artists one by one until we have enough tracks or run out of attempts
+        artist_index = 0
+        while total_queued < target_tracks and attempts < max_attempts and artist_index < len(all_artists):
+            current_artist = all_artists[artist_index]
+            artist_index += 1
+            
+            if current_artist.lower() in processed_artists:
+                continue
+                
+            processed_artists.add(current_artist.lower())
+            logging.info(f"Processing artist: {current_artist} ({artist_index}/{len(all_artists)})")
+            
+            # Get more tracks per artist (15 instead of 10)
+            artist_tracks = await get_lastfm_top_tracks(current_artist, limit=5)
+            if not artist_tracks:
+                logging.info(f"No tracks found for artist: {current_artist}")
+                continue
+                
+            # Try each track from this artist
+            for track in artist_tracks:
+                if total_queued >= target_tracks or attempts >= max_attempts:
+                    break
+                    
+                attempts += 1
+                track_title = f"{track['artist']} - {track['title']}"
+                
+                # Skip if this track title is already in the queue
+                if is_title_duplicate(track_title, queue_titles):
+                    logging.info(f"Skipping duplicate track title: {track_title}")
+                    continue
+                
+                # Try to find a non-duplicate YouTube result for this track
+                try:
+                    # Get all current titles in the queue (lowercase for case-insensitive comparison)
+                    current_queue_titles = set(entry.title.lower() for entry in queue_manager.get_queue(server_id))
+                    
+                    # Try to find a non-duplicate YouTube result
+                    entry = await find_non_duplicate_youtube_result(track_title, current_queue_titles, interaction)
+                    
+                    if entry:
+                        queue_manager.add_to_queue(server_id, entry)
+                        queue_titles.add(entry.title.lower())  # Add to our tracking set
+                        queued_tracks.append(entry.title)
+                        total_queued += 1
+                        logging.info(f"Added track {total_queued}/{target_tracks}: {entry.title}")
+                    else:
+                        logging.info(f"Could not find a unique YouTube result for: {track_title}")
+                except Exception as e:
+                    logging.error(f"Error queuing track {track_title}: {e}")
+        
+        # 4. If we still need more tracks, try to find additional artists by genre
+        if total_queued < target_tracks:
+            logging.info(f"Only found {total_queued} tracks, looking for more by genre")
+            
+            # Get artist tags (genres)
+            artist_tags = await get_artist_tags(artist_name)
+            
+            # Try each tag to find more tracks
+            for tag in artist_tags:
+                if total_queued >= target_tracks:
+                    break
+                    
+                logging.info(f"Looking for tracks with tag: {tag}")
+                tag_tracks = await get_tracks_by_tag(tag, queue_titles, limit=5)
+                
+                for track in tag_tracks:
+                    if total_queued >= target_tracks or attempts >= max_attempts:
+                        break
+                        
+                    attempts += 1
+                    track_title = f"{track['artist']} - {track['title']}"
+                    
+                    # Skip if this track title is already in the queue
+                    if is_title_duplicate(track_title, queue_titles):
+                        logging.info(f"Skipping duplicate track title: {track_title}")
+                        continue
+                    
+                    # Try to find a non-duplicate YouTube result for this track
+                    try:
+                        # Get all current titles in the queue (lowercase for case-insensitive comparison)
+                        current_queue_titles = set(entry.title.lower() for entry in queue_manager.get_queue(server_id))
+                        
+                        # Try to find a non-duplicate YouTube result
+                        entry = await find_non_duplicate_youtube_result(track_title, current_queue_titles, interaction)
+                        
+                        if entry:
+                            queue_manager.add_to_queue(server_id, entry)
+                            queue_titles.add(entry.title.lower())  # Add to our tracking set
+                            queued_tracks.append(entry.title)
+                            total_queued += 1
+                            logging.info(f"Added track {total_queued}/{target_tracks}: {entry.title}")
+                        else:
+                            logging.info(f"Could not find a unique YouTube result for: {track_title}")
+                    except Exception as e:
+                        logging.error(f"Error queuing track {track_title}: {e}")
+        
+        # 5. If we still need more tracks, use popular tracks as a last resort
+        if total_queued < target_tracks:
+            logging.info(f"Still only found {total_queued} tracks, using popular tracks")
+            
+            popular_tracks = await get_popular_tracks(queue_titles, limit=20)
+            
+            for track in popular_tracks:
+                if total_queued >= target_tracks or attempts >= max_attempts:
+                    break
+                    
+                attempts += 1
+                track_title = f"{track['artist']} - {track['title']}"
+                
+                # Skip if this track title is already in the queue
+                if is_title_duplicate(track_title, queue_titles):
+                    logging.info(f"Skipping duplicate track title: {track_title}")
+                    continue
+                
+                # Try to find a non-duplicate YouTube result for this track
+                try:
+                    # Get all current titles in the queue (lowercase for case-insensitive comparison)
+                    current_queue_titles = set(entry.title.lower() for entry in queue_manager.get_queue(server_id))
+                    
+                    # Try to find a non-duplicate YouTube result
+                    entry = await find_non_duplicate_youtube_result(track_title, current_queue_titles, interaction)
+                    
+                    if entry:
+                        queue_manager.add_to_queue(server_id, entry)
+                        queue_titles.add(entry.title.lower())  # Add to our tracking set
+                        queued_tracks.append(entry.title)
+                        total_queued += 1
+                        logging.info(f"Added track {total_queued}/{target_tracks}: {entry.title}")
+                    else:
+                        logging.info(f"Could not find a unique YouTube result for: {track_title}")
+                except Exception as e:
+                    logging.error(f"Error queuing track {track_title}: {e}")
+        
+        # 6. Display the list of tracks added to the queue
+        if queued_tracks:
+            # Create an embed to display the tracks
+            embed = Embed(
+                title="🎵 Discovered Tracks Added to Queue",
+                description=f"Based on: **{seed}**\nTotal tracks added: **{len(queued_tracks)}**",
+                color=0x3498db  # Blue color
+            )
+            
+            # Add each track as a field in the embed
+            for i, track_title in enumerate(queued_tracks):
+                embed.add_field(
+                    name=f"{i+1}. {track_title}",
+                    value="\u200b",  # Zero-width space as a placeholder
+                    inline=False
+                )
+            
+            # Send the embed to the channel
+            await interaction.followup.send(embed=embed)
+            
+            # If there's a currently playing track, send a Now Playing Menu for it
+            if queue_manager.currently_playing:
+                await ButtonView.send_now_playing_for_buttons(interaction, queue_manager.currently_playing)
+            # If there's no currently playing track but we added tracks to the queue, send a Now Playing Menu for the first track
+            elif queued_tracks and server_id in queue_manager.queues and queue_manager.queues[server_id]:
+                await ButtonView.send_now_playing_for_buttons(interaction, queue_manager.queues[server_id][0])
+            
+            logging.info(f"Successfully queued {len(queued_tracks)} tracks: {', '.join(queued_tracks)}")
+            logging.info(f"Made {attempts} attempts to find unique tracks")
+        else:
+            logging.warning(f"Failed to queue any tracks after {attempts} attempts")
+                
+        return total_queued, seed, "Last.fm"
+        
+    except Exception as e:
+        logging.error(f"Error in discover_and_queue_recommendations: {e}")
+        await interaction.followup.send(f"An error occurred while discovering songs: {str(e)}")
+        return 0, seed, "Last.fm"
 
-        total_queued = 0
+def extract_artist_from_input(text: str) -> str:
+    """Extract artist name from a string that may include a song title."""
+    if " - " in text:
+        return text.split(" - ")[0].strip()
+    return text.strip()
 
-        # 3. Get top tracks from each similar artist
-        for artist in similar_artists:
-            name = artist["name"]
-            top_url = f"http://ws.audioscrobbler.com/2.0/?method=artist.gettoptracks&artist={quote_plus(name)}&api_key={LASTFM_API_KEY}&format=json"
-            async with session.get(top_url) as resp:
-                top_data = await resp.json()
-                top_tracks = top_data.get("toptracks", {}).get("track", [])[:2]
-                for track in top_tracks:
-                    title = f"{track['artist']['name']} - {track['name']}"
-                    await process_play(interaction, youtube_title=title)
-                    total_queued += 1
+async def get_lastfm_similar_artists(artist_name: str, limit: int = 10) -> List[str]:
+    """
+    Get similar artists from Last.fm API.
+    
+    Args:
+        artist_name: The name of the artist to find similar artists for
+        limit: Maximum number of similar artists to return
+        
+    Returns:
+        List of similar artist names
+    """
+    try:
+        url = f"http://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&artist={quote_plus(artist_name)}&api_key={LASTFM_API_KEY}&format=json"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                logging.info(f"Last.fm similar artists status: {resp.status}")
+                data = await resp.json()
+                artists = data.get("similarartists", {}).get("artist", [])
+                return [artist["name"] for artist in artists[:limit]]
+    except Exception as e:
+        logging.error(f"Failed to get similar artists from Last.fm: {e}")
+        return []
+    
+async def get_lastfm_top_tracks(artist_name: str, limit: int = 10) -> List[Dict]:
+    """
+    Get top tracks for an artist from Last.fm API.
+    
+    Args:
+        artist_name: The name of the artist to get top tracks for
+        limit: Maximum number of tracks to return
+        
+    Returns:
+        List of dictionaries containing artist and title information
+    """
+    try:
+        url = f"http://ws.audioscrobbler.com/2.0/?method=artist.gettoptracks&artist={quote_plus(artist_name)}&api_key={LASTFM_API_KEY}&format=json"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                logging.info(f"Last.fm top tracks status for {artist_name}: {resp.status}")
+                data = await resp.json()
+                tracks = data.get("toptracks", {}).get("track", [])
+                return [{"artist": artist_name, "title": track["name"]} for track in tracks[:limit]]
+    except Exception as e:
+        logging.error(f"Failed to get top tracks for {artist_name} from Last.fm: {e}")
+        return []
 
-    return total_queued, seed, "Last.fm"
+async def get_artist_tags(artist_name: str, limit: int = 5) -> List[str]:
+    """
+    Get tags (genres) for an artist from Last.fm API.
+    
+    Args:
+        artist_name: The name of the artist to get tags for
+        limit: Maximum number of tags to return
+        
+    Returns:
+        List of tag names
+    """
+    try:
+        url = f"http://ws.audioscrobbler.com/2.0/?method=artist.getinfo&artist={quote_plus(artist_name)}&api_key={LASTFM_API_KEY}&format=json"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                logging.info(f"Last.fm artist info status for {artist_name}: {resp.status}")
+                data = await resp.json()
+                tags = data.get("artist", {}).get("tags", {}).get("tag", [])
+                return [tag["name"] for tag in tags[:limit]]
+    except Exception as e:
+        logging.error(f"Failed to get tags for {artist_name} from Last.fm: {e}")
+        return ["rock", "pop"]  # Default tags if we can't get any
 
+async def get_tracks_by_tag(tag: str, queue_titles: Set[str], limit: int = 10) -> List[Dict]:
+    """
+    Get top tracks for a tag (genre) from Last.fm API.
+    
+    Args:
+        tag: The tag to get tracks for
+        queue_titles: Set of lowercase titles already in the queue
+        limit: Maximum number of tracks to return
+        
+    Returns:
+        List of dictionaries containing artist and title information
+    """
+    try:
+        url = f"http://ws.audioscrobbler.com/2.0/?method=tag.gettoptracks&tag={quote_plus(tag)}&api_key={LASTFM_API_KEY}&format=json"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                logging.info(f"Last.fm tag top tracks status for {tag}: {resp.status}")
+                data = await resp.json()
+                tracks = data.get("tracks", {}).get("track", [])
+                
+                # Filter out tracks that are already in the queue
+                result = []
+                for track in tracks:
+                    track_title = f"{track['artist']['name']} - {track['name']}"
+                    if not is_title_duplicate(track_title, queue_titles):
+                        result.append({"artist": track['artist']['name'], "title": track['name']})
+                        if len(result) >= limit:
+                            break
+                
+                return result
+    except Exception as e:
+        logging.error(f"Failed to get tracks for tag {tag} from Last.fm: {e}")
+        return []
+
+async def get_popular_tracks(queue_titles: Set[str], limit: int = 10) -> List[Dict]:
+    """
+    Get popular tracks from Last.fm API.
+    
+    Args:
+        queue_titles: Set of lowercase titles already in the queue
+        limit: Maximum number of tracks to return
+        
+    Returns:
+        List of dictionaries containing artist and title information
+    """
+    try:
+        url = f"http://ws.audioscrobbler.com/2.0/?method=chart.gettoptracks&api_key={LASTFM_API_KEY}&format=json"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                logging.info(f"Last.fm chart top tracks status: {resp.status}")
+                data = await resp.json()
+                tracks = data.get("tracks", {}).get("track", [])
+                
+                # Filter out tracks that are already in the queue
+                result = []
+                for track in tracks:
+                    track_title = f"{track['artist']['name']} - {track['name']}"
+                    if not is_title_duplicate(track_title, queue_titles):
+                        result.append({"artist": track['artist']['name'], "title": track['name']})
+                        if len(result) >= limit:
+                            break
+                
+                return result
+    except Exception as e:
+        logging.error(f"Failed to get popular tracks from Last.fm: {e}")
+        return []

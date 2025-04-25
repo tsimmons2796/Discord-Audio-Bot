@@ -30,7 +30,8 @@ from command_functions import (
     process_clear_queue,
     process_move_to_next,
     process_search_and_play_from_queue,
-    process_remove_duplicates
+    process_remove_duplicates,
+    discover_and_queue_recommendations
 )
 
 logging.basicConfig(level=logging.DEBUG, filename='commands.log', format='%(asctime)s:%(levelname)s:%(message)s')
@@ -146,7 +147,7 @@ class MusicCommands(commands.Cog):
         logging.debug("Help command executed")
         await process_help(interaction)
 
-    @app_commands.command(name="discover", description="Discover songs based on the current song or input artist.")
+    @app_commands.command(name="discover", description="Discover songs based on the current song or input artist, avoiding duplicates.")
     @app_commands.describe(
         artist_or_song="Optional: Provide an artist or song to use instead of the current playing track"
     )
@@ -156,8 +157,12 @@ class MusicCommands(commands.Cog):
         await interaction.response.defer(thinking=True)
 
         try:
-            from command_functions import discover_and_queue_recommendations
+            # Call the enhanced discover_and_queue_recommendations function
+            # This function now displays the list of tracks and shows the Now Playing Menu
             count, seed, source = await discover_and_queue_recommendations(interaction, artist_or_song)
+            
+            # We don't need to send a followup message here since the function now handles
+            # displaying the list of tracks and showing the Now Playing Menu
             if count == 0:
                 await interaction.followup.send(
                     f"❌ No tracks could be queued.\n"
@@ -170,7 +175,7 @@ class MusicCommands(commands.Cog):
                     f"🎧 Discovery complete!\n"
                     f"🔍 Source: {source}\n"
                     f"🌱 Seed Artist: {seed}\n"
-                    f"🎶 Tracks Queued: {count}",
+                    f"🎶 Tracks Queued: {count} (all unique, no duplicates)",
                     ephemeral=True
                 )
         except Exception as e:
