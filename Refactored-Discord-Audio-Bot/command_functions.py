@@ -878,7 +878,7 @@ async def discover_and_queue_recommendations(interaction, artist_or_song: Option
     # Track artists we've already processed to avoid duplicates
     processed_artists = set()
     total_queued = 0
-    max_attempts = 50  # Increased limit for more thorough search
+    max_attempts = 10  # Increased limit for more thorough search
     target_tracks = 8  # Target number of tracks to queue
     
     try:
