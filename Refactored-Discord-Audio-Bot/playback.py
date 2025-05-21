@@ -58,6 +58,7 @@ class PlaybackManager:
             self.queue_manager.stop_is_triggered = False
             if error:
                 logging.error(f"Error playing {entry.title}: {error}")
+                print(f"Error playing {entry.title}: {error}")
                 bot_client = ctx_or_interaction.client if isinstance(ctx_or_interaction, Interaction) else ctx_or_interaction.bot
                 asyncio.run_coroutine_threadsafe(ctx_or_interaction.channel.send("Error occurred during playback."), bot_client.loop).result()
             else:
@@ -91,20 +92,6 @@ class PlaybackManager:
             self.queue_manager.save_queues()
             bot_client = ctx_or_interaction.client if isinstance(ctx_or_interaction, Interaction) else ctx_or_interaction.bot
             asyncio.run_coroutine_threadsafe(self.play_next(ctx_or_interaction), bot_client.loop).result()
-            
-    def after_playing(self, ctx_or_interaction, entry):
-        def after_playing_callback(error):
-            self.queue_manager.stop_is_triggered = False
-            if error:
-                logging.error(f"Error playing {entry.title}: {error}")
-                print(f"Error playing {entry.title}: {error}")
-                bot_client = ctx_or_interaction.client if isinstance(ctx_or_interaction, Interaction) else ctx_or_interaction.bot
-                asyncio.run_coroutine_threadsafe(ctx_or_interaction.channel.send("Error occurred during playback."), bot_client.loop).result()
-            else:
-                logging.info(f"Finished playing {entry.title} at {datetime.now()}")
-                print(f"Finished playing {entry.title} at {datetime.now()}")
-                self.manage_queue_after_playback(ctx_or_interaction, entry)
-        return after_playing_callback
 
     async def start_playback(self, ctx_or_interaction, entry, after_callback):
         try:

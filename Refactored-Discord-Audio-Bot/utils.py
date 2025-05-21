@@ -1,20 +1,26 @@
+import os
 import re
 import aiohttp
 import yt_dlp
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from pydub import AudioSegment
+# from pydub import AudioSegment
 from mutagen.mp3 import MP3
 import logging
-import os
 import asyncio
 from discord import Embed, FFmpegPCMAudio, PCMVolumeTransformer, Interaction
 from discord.utils import get
 from discord.errors import NotFound
 from lyricsgenius import Genius
 from dotenv import load_dotenv
+import config  # ✅ Import your config to access MUSICBRAINZ_USER_AGENT
 
 load_dotenv()
+
+# Global rate limit lock and timer
+musicbrainz_lock = asyncio.Lock()
+last_musicbrainz_call = 0
 
 logging.basicConfig(level=logging.DEBUG, filename='utils.log', format='%(asctime)s:%(levelname)s:%(message)s')
 
@@ -45,6 +51,35 @@ UNWANTED_PATTERNS = [
     r'\[ Visualizer \]',
     # Add more patterns as needed
 ]
+
+async def rate_limited_musicbrainz_get(session, url):
+    global last_musicbrainz_call
+
+    try:
+        async with musicbrainz_lock:
+            now = asyncio.get_event_loop().time()
+            wait_time = 1.5 - (now - last_musicbrainz_call)
+            if wait_time > 0:
+                await asyncio.sleep(wait_time)
+            last_musicbrainz_call = asyncio.get_event_loop().time()
+
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status != 200:
+                    logging.warning(f"MusicBrainz request failed with status {response.status} for URL: {url}")
+                    return {}
+                return await response.json()
+
+    except asyncio.TimeoutError:
+        logging.error(f"Timeout during MusicBrainz request: {url}")
+        return {}
+
+    except aiohttp.ClientError as e:
+        logging.error(f"Client error during MusicBrainz request: {url} — {e}")
+        return {}
+
+    except Exception as e:
+        logging.exception(f"Unexpected error during MusicBrainz request: {url} — {e}")
+        return {}
 
 def sanitize_title(title: str) -> str:
     """
@@ -120,17 +155,37 @@ async def delete_file(file_path: str):
         logging.warning(f"File not found for deletion: {file_path}")
 
 async def fetch_info(url, index: int = None):
+    """
+    Fetch information about a YouTube video or playlist with enhanced options to bypass restrictions.
+    
+    Args:
+        url (str): The YouTube URL to fetch info for
+        index (int, optional): The playlist index to fetch, if applicable
+        
+    Returns:
+        dict: Information about the video or playlist
+    """
+    # Standard options with enhanced user agent and headers
     ydl_opts = {
         'format': 'bestaudio/best',
         'noplaylist': False if "list=" in url else True,
         'playlist_items': str(index) if index is not None else None,
-        'ignoreerrors': True
+        'ignoreerrors': True,
+        'cookiefile': 'cookies.txt',
+        'http_headers': {
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
+        }
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             logging.debug(f"Fetching info for URL: {url}, index: {index}")
             info = await asyncio.get_running_loop().run_in_executor(executor, lambda: ydl.extract_info(url, download=False))
+            
+            # Process playlist entries if present
             if 'entries' in info:
                 entries = []
                 for entry in info['entries']:
@@ -142,6 +197,7 @@ async def fetch_info(url, index: int = None):
                         logging.debug(f"Processing entry: {entry.get('title', 'Unknown title')}")
                 info['entries'] = entries
             else:
+                # Process single video
                 info['duration'] = info.get('duration', 0)
                 info['thumbnail'] = info.get('thumbnail', '')
                 info['best_audio_url'] = next((f['url'] for f in info['formats'] if f.get('acodec') != 'none'), info.get('url'))
@@ -149,6 +205,74 @@ async def fetch_info(url, index: int = None):
             return info
     except yt_dlp.utils.ExtractorError as e:
         logging.warning(f"Skipping unavailable video: {str(e)}")
+        return None
+    except Exception as e:
+        logging.error(f"Error fetching info for URL {url}: {str(e)}")
+        # Try with more aggressive options if standard options fail
+        return await fetch_info_with_aggressive_options(url, index)
+
+async def fetch_info_with_aggressive_options(url, index: int = None):
+    """
+    Fallback method with more aggressive options to bypass YouTube restrictions.
+    
+    Args:
+        url (str): The YouTube URL to fetch info for
+        index (int, optional): The playlist index to fetch, if applicable
+        
+    Returns:
+        dict: Information about the video or playlist
+    """
+    logging.info(f"Using aggressive options to fetch info for URL: {url}")
+    
+    # More aggressive options to bypass restrictions
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'noplaylist': False if "list=" in url else True,
+        'playlist_items': str(index) if index is not None else None,
+        'ignoreerrors': True,
+        'cookiefile': 'cookies.txt',
+        'source_address': '0.0.0.0',  # Use all available network interfaces
+        'force_ipv4': True,           # Force IPv4 to avoid IPv6 issues
+        'rm_cachedir': True,          # Remove cache to avoid stale data
+        'http_headers': {
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            ),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://www.youtube.com/',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        }
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await asyncio.get_running_loop().run_in_executor(executor, lambda: ydl.extract_info(url, download=False))
+            
+            # Process playlist entries if present
+            if 'entries' in info:
+                entries = []
+                for entry in info['entries']:
+                    if entry and not entry.get('is_unavailable', False):
+                        entry['duration'] = entry.get('duration', 0)
+                        entry['thumbnail'] = entry.get('thumbnail', '')
+                        entry['best_audio_url'] = next((f['url'] for f in entry['formats'] if f.get('acodec') != 'none'), entry.get('url'))
+                        entries.append(entry)
+                info['entries'] = entries
+            else:
+                # Process single video
+                info['duration'] = info.get('duration', 0)
+                info['thumbnail'] = info.get('thumbnail', '')
+                info['best_audio_url'] = next((f['url'] for f in info['formats'] if f.get('acodec') != 'none'), info.get('url'))
+            
+            logging.info(f"Successfully fetched info with aggressive options for URL: {url}")
+            return info
+    except Exception as e:
+        logging.error(f"Failed to fetch info even with aggressive options for URL {url}: {str(e)}")
         return None
     
 def create_now_playing_embed(entry):
@@ -254,29 +378,19 @@ async def get_lyrics(query: str) -> str:
                 if validate_lyrics(lyrics, title.strip(), artist.strip()):
                     print(f"Lyrics found for {artist.strip()} - {title.strip()}")
                     return f"Lyrics for {artist.strip()} - {title.strip()}\n\n{lyrics}"
-                # else:
-                #     print(f"Lyrics not found for {title.strip()} by {artist.strip()}")
-                #     return f"Lyrics not found for {title.strip()} by {artist.strip()}"
 
         print(f"Searching with the entire query: {query}")
         song = genius.search_song(query)
         if song:
             lyrics = process_lyrics(song.lyrics)
-            print(f"Lyrics after processing:\n{lyrics}")
-            if validate_lyrics(lyrics, song.title, song.artist):
-                print(f"Lyrics found for {song.artist} - {song.title}")
-                return f"Lyrics for {song.artist} - {song.title}\n\n{lyrics}"
-            else:
-                print(f"Lyrics not found for {song.title} by {song.artist}")
-                return f"Lyrics not found for {song.title} by {song.artist}"
+            print(f"Lyrics found for query: {query}")
+            return f"Lyrics for {song.artist} - {song.title}\n\n{lyrics}"
 
-        print("Lyrics not found.")
-        return "Lyrics not found."
+        print(f"No lyrics found for query: {query}")
+        return f"No lyrics found for {query}"
     except Exception as e:
-        logging.error(f"Error fetching lyrics: {e}")
-        print(f"Exception: {e}")
-        return "An error occurred while fetching the lyrics."
-    
+        print(f"Error getting lyrics: {e}")
+        return f"Error getting lyrics: {e}"
 async def remove_orphaned_mp3_files(queue_manager, download_folder: str = 'downloaded-mp3s'):
     """Remove MP3 files that are not in the current queues."""
     logging.debug("Checking for orphaned MP3 files.")

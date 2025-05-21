@@ -2,9 +2,14 @@ import logging
 from discord.ext import commands
 from discord import Attachment, Interaction, app_commands
 from queue_manager import queue_manager
+from config import LASTFM_API_KEY
+from urllib.parse import quote_plus
+import aiohttp
+import asyncio
+import aiohttp
 from playback import PlaybackManager
 from typing import Optional
-
+from yt_dlp import YoutubeDL
 from command_functions import (
     process_help,
     process_play_next,
@@ -24,7 +29,9 @@ from command_functions import (
     process_mp3_list,
     process_clear_queue,
     process_move_to_next,
-    process_search_and_play_from_queue
+    process_search_and_play_from_queue,
+    process_remove_duplicates,
+    discover_and_queue_recommendations
 )
 
 logging.basicConfig(level=logging.DEBUG, filename='commands.log', format='%(asctime)s:%(levelname)s:%(message)s')
@@ -35,6 +42,9 @@ class MusicCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         logging.debug("Initializing MusicCommands Cog")
+        # Initialize pandora_tasks dictionary for memory management
+        if not hasattr(bot, "pandora_tasks"):
+            bot.pandora_tasks = {}
 
     async def title_autocomplete(self, interaction: Interaction, current: str):
         server_id = str(interaction.guild.id)
@@ -48,6 +58,11 @@ class MusicCommands(commands.Cog):
         await interaction.response.defer()  # Defer the interaction response
         logging.debug(f"Play next command executed for youtube_url: {youtube_url}, youtube_title: {youtube_title}, mp3_file: {mp3_file}")
         await process_play_next(interaction, youtube_url, youtube_title, mp3_file)
+        
+    @app_commands.command(name='remove_duplicates', description='Remove duplicate songs from the queue based on title.')
+    async def remove_duplicates(self, interaction: Interaction):
+        logging.debug("Remove duplicates command triggered")
+        await process_remove_duplicates(interaction)
 
     @app_commands.command(name='play', description='Play a YT URL, YT Title, or MP3 file if no audio is playing or add it to the end of the queue.')
     async def play(self, interaction: Interaction, youtube_url: str = None, youtube_title: str = None, mp3_file: Optional[Attachment] = None):
@@ -131,7 +146,42 @@ class MusicCommands(commands.Cog):
     async def help_command(self, interaction: Interaction):
         logging.debug("Help command executed")
         await process_help(interaction)
-        
+
+    @app_commands.command(name="discover", description="Discover songs based on the current song or input artist, avoiding duplicates.")
+    @app_commands.describe(
+        artist_or_song="Optional: Provide an artist or song to use instead of the current playing track"
+    )
+    async def discover(self, interaction: Interaction, artist_or_song: Optional[str] = None):
+        print("🔊 /discover command triggered")
+        logging.info(f"/discover was invoked by {interaction.user}")
+        await interaction.response.defer(thinking=True)
+
+        try:
+            # Call the enhanced discover_and_queue_recommendations function
+            # This function now displays the list of tracks and shows the Now Playing Menu
+            count, seed, source = await discover_and_queue_recommendations(interaction, artist_or_song)
+            
+            # We don't need to send a followup message here since the function now handles
+            # displaying the list of tracks and showing the Now Playing Menu
+            if count == 0:
+                await interaction.followup.send(
+                    f"❌ No tracks could be queued.\n"
+                    f"🔍 Source tried: {source}\n"
+                    f"🌱 Seed used: {seed}",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    f"🎧 Discovery complete!\n"
+                    f"🔍 Source: {source}\n"
+                    f"🌱 Seed Artist: {seed}\n"
+                    f"🎶 Tracks Queued: {count} (all unique, no duplicates)",
+                    ephemeral=True
+                )
+        except Exception as e:
+            logging.error(f"Error in /discover: {e}")
+            await interaction.followup.send("❌ Something went wrong with discovery.", ephemeral=True)
+            
     @commands.command(name='mp3_list_next')
     async def mp3_list_next(self, ctx):
         logging.debug("mp3_list_next command invoked")
