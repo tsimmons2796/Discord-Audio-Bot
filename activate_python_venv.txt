@@ -1,0 +1,5 @@
+➜  Discord-Audio-Bot git:(main) ✗ source .venv/bin/activate
+(.venv) ➜  Discord-Audio-Bot git:(main) ✗ 
+cd Refactored-Discord-Audio-Bot
+
+(.venv) ➜  Refactored-Discord-Audio-Bot git:(main) ✗ deactivate
